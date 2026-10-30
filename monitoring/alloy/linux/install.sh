@@ -30,7 +30,7 @@ script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if [[ -f /etc/alloy/config.alloy ]]; then
   cp -a /etc/alloy/config.alloy "/etc/alloy/config.alloy.bak-$(date +%Y%m%d-%H%M%S)"
 fi
-install -o root -g alloy -m 0640 "${script_dir}/config-linux.alloy" /etc/alloy/config.alloy
+install -o root -g alloy -m 0640 "${script_dir}/config.alloy" /etc/alloy/config.alloy
 
 alloy validate /etc/alloy/config.alloy
 systemctl enable --now alloy

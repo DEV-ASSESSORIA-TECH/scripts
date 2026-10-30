@@ -1,0 +1,73 @@
+prometheus.exporter.windows "windows" {
+  enabled_collectors = ["cpu", "logical_disk", "memory", "net", "os", "physical_disk", "service", "system"]
+}
+
+discovery.relabel "windows" {
+  targets = prometheus.exporter.windows.windows.targets
+  rule {
+    target_label = "job"
+    replacement  = "windows"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = constants.hostname
+  }
+  rule {
+    target_label = "host"
+    replacement  = constants.hostname
+  }
+}
+
+prometheus.scrape "windows" {
+  targets         = discovery.relabel.windows.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+prometheus.remote_write "central" {
+  endpoint {
+    url = "https://mon.assessoriatech.com/api/v1/write"
+    oauth2 {
+      client_id          = "1T4SNZ8iDuvM18ZIB9fSc109ZZVglsXBtLxeU4ng"
+      client_secret_file = "C:\\ProgramData\\GrafanaLabs\\Alloy\\oauth-client-secret"
+      token_url          = "https://auth.assessoriatech.com/application/o/token/"
+      scopes             = ["profile"]
+    }
+  }
+}
+
+loki.source.windowsevent "application" {
+  eventlog_name          = "Application"
+  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\bookmark-application.xml"
+  use_incoming_timestamp = true
+  labels                 = { host = constants.hostname, channel = "Application" }
+  forward_to             = [loki.relabel.eventlog.receiver]
+}
+
+loki.source.windowsevent "system" {
+  eventlog_name          = "System"
+  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\bookmark-system.xml"
+  use_incoming_timestamp = true
+  labels                 = { host = constants.hostname, channel = "System" }
+  forward_to             = [loki.relabel.eventlog.receiver]
+}
+
+loki.relabel "eventlog" {
+  forward_to = [loki.write.central.receiver]
+  rule {
+    target_label = "job"
+    replacement  = "windows-eventlog"
+  }
+}
+
+loki.write "central" {
+  endpoint {
+    url = "https://mon.assessoriatech.com/loki/api/v1/push"
+    oauth2 {
+      client_id          = "1T4SNZ8iDuvM18ZIB9fSc109ZZVglsXBtLxeU4ng"
+      client_secret_file = "C:\\ProgramData\\GrafanaLabs\\Alloy\\oauth-client-secret"
+      token_url          = "https://auth.assessoriatech.com/application/o/token/"
+      scopes             = ["profile"]
+    }
+  }
+}

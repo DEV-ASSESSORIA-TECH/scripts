@@ -1,0 +1,67 @@
+// Monitoramento de Docker (metricas e logs dos containers).
+// Complementa o config.alloy: usa prometheus.remote_write.central e
+// loki.write.central definidos la. Os dois arquivos devem ficar no mesmo
+// diretorio e o Alloy deve carregar o diretorio (CONFIG_FILE=/etc/alloy).
+// Requer: usermod -aG docker alloy
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+// Metricas dos containers (CPU, memoria, rede, disco) via cAdvisor embutido.
+prometheus.exporter.cadvisor "docker" {
+  docker_host      = "unix:///var/run/docker.sock"
+  storage_duration = "5m"
+}
+
+discovery.relabel "docker_metrics" {
+  targets = prometheus.exporter.cadvisor.docker.targets
+  rule {
+    target_label = "job"
+    replacement  = "cadvisor"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = constants.hostname
+  }
+  rule {
+    target_label = "host"
+    replacement  = constants.hostname
+  }
+}
+
+prometheus.scrape "docker" {
+  targets         = discovery.relabel.docker_metrics.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+// Logs dos containers.
+discovery.relabel "docker_logs" {
+  targets = []
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "compose_project"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "compose_service"
+  }
+}
+
+loki.source.docker "containers" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.docker.containers.targets
+  labels        = { host = constants.hostname, job = "docker" }
+  relabel_rules = discovery.relabel.docker_logs.rules
+  forward_to    = [loki.write.central.receiver]
+}
