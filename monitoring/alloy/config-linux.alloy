@@ -1,0 +1,61 @@
+prometheus.exporter.unix "linux" {}
+
+discovery.relabel "linux" {
+  targets = prometheus.exporter.unix.linux.targets
+  rule {
+    target_label = "job"
+    replacement  = "node"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = constants.hostname
+  }
+  rule {
+    target_label = "host"
+    replacement  = constants.hostname
+  }
+}
+
+prometheus.scrape "linux" {
+  targets         = discovery.relabel.linux.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+prometheus.remote_write "central" {
+  endpoint {
+    url = "https://mon.assessoriatech.com/api/v1/write"
+    oauth2 {
+      client_id          = "1T4SNZ8iDuvM18ZIB9fSc109ZZVglsXBtLxeU4ng"
+      client_secret_file = "/etc/alloy/oauth-client-secret"
+      token_url          = "https://auth.assessoriatech.com/application/o/token/"
+      scopes             = ["profile"]
+    }
+  }
+}
+
+loki.source.journal "linux" {
+  max_age    = "1h"
+  labels     = { host = constants.hostname }
+  forward_to = [loki.relabel.journal.receiver]
+}
+
+loki.relabel "journal" {
+  forward_to = [loki.write.central.receiver]
+  rule {
+    target_label = "job"
+    replacement  = "systemd-journal"
+  }
+}
+
+loki.write "central" {
+  endpoint {
+    url = "https://mon.assessoriatech.com/loki/api/v1/push"
+    oauth2 {
+      client_id          = "1T4SNZ8iDuvM18ZIB9fSc109ZZVglsXBtLxeU4ng"
+      client_secret_file = "/etc/alloy/oauth-client-secret"
+      token_url          = "https://auth.assessoriatech.com/application/o/token/"
+      scopes             = ["profile"]
+    }
+  }
+}
