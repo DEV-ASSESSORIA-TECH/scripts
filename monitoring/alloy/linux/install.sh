@@ -96,10 +96,13 @@ install -d -o root -g alloy -m 0750 /etc/alloy
 chown root:alloy /etc/alloy/oauth-client-secret
 chmod 0640 /etc/alloy/oauth-client-secret
 usermod -aG adm,systemd-journal alloy
+# Docker requer acesso aos cgroups protegidos por agentes de seguranca.
+# O servico executa como root SOMENTE quando o modulo Docker estiver ativo.
+# Nao adicionamos alloy ao grupo docker: o servico root nao precisa disso.
 if [[ $use_docker == true ]]; then
-  getent group docker >/dev/null || fail 'Grupo Docker ausente.'
-  log 'AVISO: adicionando alloy ao grupo docker (privilegios equivalentes a root).'
-  usermod -aG docker alloy
+  log 'Modulo Docker: Alloy executara como root (acesso a cgroups e docker.sock).'
+else
+  log 'Base Linux: Alloy executara como usuario alloy.'
 fi
 
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
@@ -107,10 +110,15 @@ backup=$(mktemp -d)
 old_active=$(systemctl is-active alloy 2>/dev/null || true)
 old_enabled=$(systemctl is-enabled alloy 2>/dev/null || true)
 env_file=/etc/default/alloy
+# Nome ordenado depois de override.conf: prevalece sobre overrides anteriores,
+# inclusive o override.conf usado no teste manual do SRV-VPN.
+dropin_dir=/etc/systemd/system/alloy.service.d
+dropin_file="$dropin_dir/zz-assessoriatech-execution.conf"
 for name in config.alloy docker.alloy; do
   [[ ! -f /etc/alloy/$name ]] || cp -a -- "/etc/alloy/$name" "$backup/$name"
 done
 [[ ! -f "$env_file" ]] || cp -a -- "$env_file" "$backup/default.alloy"
+[[ ! -f "$dropin_file" ]] || cp -a -- "$dropin_file" "$backup/execution.conf"
 
 rollback() {
   log 'Restaurando arquivos anteriores...'
@@ -126,7 +134,34 @@ rollback() {
   else
     rm -f -- "$env_file"
   fi
-  if [[ $old_active == active ]]; then systemctl restart alloy || true; else systemctl stop alloy || true; fi
+  if [[ -f "$backup/execution.conf" ]]; then
+    install -D -o root -g root -m 0644 "$backup/execution.conf" "$dropin_file"
+  else
+    rm -f -- "$dropin_file"
+  fi
+  systemctl daemon-reload
+  # Muitas reinicializacoes em sequencia podem disparar start-limit-hit.
+  systemctl reset-failed alloy || true
+  if [[ $old_active == active ]]; then
+    systemctl restart alloy || log 'CRITICO: erro ao reiniciar a configuracao restaurada.'
+    restored=false
+    for attempt in {1..12}; do
+      if systemctl is-active --quiet alloy &&
+         curl -fsS --max-time 2 http://127.0.0.1:12345/-/ready >/dev/null 2>&1; then
+        restored=true
+        break
+      fi
+      sleep 1
+    done
+    if [[ $restored == true ]]; then
+      log 'Configuracao anterior restaurada e Alloy pronto.'
+    else
+      log 'CRITICO: arquivos restaurados, mas Alloy nao ficou pronto.'
+      journalctl -u alloy -n 30 --no-pager >&2 || true
+    fi
+  else
+    systemctl stop alloy || true
+  fi
   [[ $old_enabled == enabled ]] || systemctl disable alloy || true
 }
 
@@ -149,7 +184,33 @@ else
   printf '\nCONFIG_FILE="/etc/alloy"\n' >> "$env_file"
 fi
 
-log 'Habilitando e iniciando Alloy...'
+# Drop-in gerenciado pelo instalador. Base Linux volta a ser nao privilegiada
+# mesmo se um override.conf manual anterior ainda especificar User=root.
+install -d -o root -g root -m 0755 "$dropin_dir"
+managed_dropin=$(mktemp "$dropin_dir/.zz-assessoriatech-execution.XXXXXX")
+if [[ $use_docker == true ]]; then
+  printf '[Service]\nUser=root\nGroup=root\n' > "$managed_dropin"
+  desired_user=root
+  desired_group=root
+else
+  printf '[Service]\nUser=alloy\nGroup=alloy\n' > "$managed_dropin"
+  desired_user=alloy
+  desired_group=alloy
+fi
+chown root:root "$managed_dropin"
+chmod 0644 "$managed_dropin"
+mv -f -- "$managed_dropin" "$dropin_file"
+systemctl daemon-reload
+systemctl reset-failed alloy || true
+
+actual_user=$(systemctl show alloy --property=User --value)
+actual_group=$(systemctl show alloy --property=Group --value)
+if [[ $actual_user != "$desired_user" || $actual_group != "$desired_group" ]]; then
+  rollback
+  fail "Usuario efetivo incorreto: $actual_user:$actual_group (esperado $desired_user:$desired_group)."
+fi
+
+log "Habilitando e iniciando Alloy como $desired_user:$desired_group..."
 systemctl enable alloy
 if ! systemctl restart alloy; then
   journalctl -u alloy -n 30 --no-pager >&2 || true
@@ -178,8 +239,9 @@ for name in config.alloy docker.alloy; do
   [[ ! -f "$backup/$name" ]] || cp -a -- "$backup/$name" "/etc/alloy/backups/$name.$stamp"
 done
 [[ ! -f "$backup/default.alloy" ]] || cp -a -- "$backup/default.alloy" "/etc/alloy/backups/default.alloy.$stamp"
+[[ ! -f "$backup/execution.conf" ]] || cp -a -- "$backup/execution.conf" "/etc/alloy/backups/execution.conf.$stamp"
 rm -rf -- "$backup"
 
-log 'Alloy ativo e pronto.'
+log "Alloy ativo e pronto como $desired_user:$desired_group."
 log "Modulos: Linux$( [[ $use_docker == true ]] && printf ' + Docker' || true )"
 systemctl --no-pager --full status alloy
