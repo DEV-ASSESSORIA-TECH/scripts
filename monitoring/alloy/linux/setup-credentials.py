@@ -113,9 +113,13 @@ def main():
         {"Content-Type": "application/x-www-form-urlencoded"},
         "Teste 1 - OAuth2",
     )
+    
     if status != 200:
-        print(f"Teste 1 - OAuth2: HTTP {status} | REPROVADO - autenticacao negada")
+        print(f"Teste 1 - OAuth2: HTTP {status} | REPROVADO")
+        print("Resposta do servidor:")
+        print(response_body.decode("utf-8", errors="replace")[:1000])
         raise SystemExit("Nenhum arquivo local foi alterado.")
+        
     try:
         access_token = json.loads(response_body)["access_token"]
         if not isinstance(access_token, str) or not access_token:
