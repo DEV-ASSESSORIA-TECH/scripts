@@ -3,6 +3,14 @@ set -euo pipefail
 
 log() { printf '[Alloy] %s\n' "$*"; }
 fail() { printf '[Alloy] ERRO: %s\n' "$*" >&2; exit 1; }
+
+# O servico pode ainda nao estar carregado durante a primeira instalacao.
+# So tentar limpar falhas quando a unidade realmente estiver em estado failed.
+reset_failed_alloy() {
+  if systemctl is-failed --quiet alloy.service 2>/dev/null; then
+    systemctl reset-failed alloy.service || true
+  fi
+}
 usage() {
   printf 'Uso: sudo bash install.sh [--modules docker|none] [--upgrade]\n'
   printf 'Sem parametro: detecta Docker, preserva modulo existente e nao altera a versao do Alloy.\n'
@@ -99,7 +107,22 @@ else
   export NEEDRESTART_MODE=l DEBIAN_FRONTEND=noninteractive
   log 'Preparando repositorio Grafana (instalacao ou upgrade explicito)...'
   apt-get update
-  apt-get install -y ca-certificates curl python3
+
+  # Evitar atualizar dependencias ja instaladas durante o bootstrap.
+  # Instalar somente pacotes ausentes; --upgrade atualiza apenas o Alloy.
+  missing_packages=()
+  for pkg in ca-certificates curl python3; do
+    if [[ $(dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null || true) != 'install ok installed' ]]; then
+      missing_packages+=("$pkg")
+    fi
+  done
+  if (( ${#missing_packages[@]} )); then
+    log "Instalando dependencias ausentes: ${missing_packages[*]}"
+    apt-get install -y --no-upgrade "${missing_packages[@]}"
+  else
+    log 'Dependencias do instalador ja presentes. Nenhuma atualizacao necessaria.'
+  fi
+
   install -d -m 0755 /etc/apt/keyrings
   curl -fsSL https://apt.grafana.com/gpg-full.key -o /etc/apt/keyrings/grafana.asc
   chmod 0644 /etc/apt/keyrings/grafana.asc
@@ -226,7 +249,7 @@ rollback() {
     rm -f -- "$dropin_file"
   fi
   systemctl daemon-reload
-  systemctl reset-failed alloy || true
+  reset_failed_alloy
   if [[ $old_active == active ]]; then
     systemctl restart alloy || log 'CRITICO: falha ao reiniciar configuracao restaurada.'
     restored=false
@@ -275,7 +298,7 @@ fi
 
 # Apenas reiniciar ao mudar configuracao, usuario ou versao, ou se parado.
 log "Habilitando e iniciando Alloy como $desired_user:$desired_group..."
-systemctl reset-failed alloy || true
+reset_failed_alloy
 if ! systemctl enable alloy || ! systemctl restart alloy; then
   journalctl -u alloy -n 30 --no-pager >&2 || true
   rollback
