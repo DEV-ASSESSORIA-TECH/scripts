@@ -29,7 +29,16 @@ opener = urllib.request.build_opener(NoRedirect)
 
 
 def post(url, body, headers, label):
-    request = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={
+            "User-Agent": "AssessoriaTech-Alloy-Setup/1.0",
+            "Accept": "application/json",
+            **headers,
+        },
+        method="POST",
+    )
     try:
         with opener.open(request, timeout=12) as response:
             return response.status, response.read(8192)
