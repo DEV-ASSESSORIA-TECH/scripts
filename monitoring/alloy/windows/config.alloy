@@ -1,20 +1,35 @@
+// Base Windows: host, servicos e canais Application/System.
+// Carregada como parte do diretorio C:\ProgramData\GrafanaLabs\Alloy\config.
+// Modulos futuros (*.alloy) compartilham prometheus.remote_write.central
+// e loki.write.central, sem duplicar autenticacao.
+
 prometheus.exporter.windows "windows" {
-  enabled_collectors = ["cpu", "logical_disk", "memory", "net", "os", "physical_disk", "service", "system"]
+  enabled_collectors = [
+    "cpu",
+    "logical_disk",
+    "memory",
+    "net",
+    "os",
+    "physical_disk",
+    "service",
+    "system",
+  ]
 }
 
 discovery.relabel "windows" {
   targets = prometheus.exporter.windows.windows.targets
+
   rule {
     target_label = "job"
-    replacement  = "windows"
+    replacement  = "integrations/windows"
   }
   rule {
     target_label = "instance"
-    replacement  = constants.hostname
+    replacement  = string.to_lower(constants.hostname)
   }
   rule {
     target_label = "host"
-    replacement  = constants.hostname
+    replacement  = string.to_lower(constants.hostname)
   }
 }
 
@@ -36,27 +51,45 @@ prometheus.remote_write "central" {
   }
 }
 
+// Bookmarks persistentes, separados da configuracao e credenciais.
 loki.source.windowsevent "application" {
   eventlog_name          = "Application"
-  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\bookmark-application.xml"
+  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\application.xml"
   use_incoming_timestamp = true
-  labels                 = { host = constants.hostname, channel = "Application" }
-  forward_to             = [loki.relabel.eventlog.receiver]
+  labels = {
+    host    = string.to_lower(constants.hostname),
+    channel = "Application",
+    job     = "windows-eventlog",
+  }
+  forward_to = [loki.process.eventlog.receiver]
 }
 
 loki.source.windowsevent "system" {
   eventlog_name          = "System"
-  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\bookmark-system.xml"
+  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\system.xml"
   use_incoming_timestamp = true
-  labels                 = { host = constants.hostname, channel = "System" }
-  forward_to             = [loki.relabel.eventlog.receiver]
+  labels = {
+    host    = string.to_lower(constants.hostname),
+    channel = "System",
+    job     = "windows-eventlog",
+  }
+  forward_to = [loki.process.eventlog.receiver]
 }
 
-loki.relabel "eventlog" {
+// Eventos originais permanecem em JSON (incluindo event_id e source).
+// Somente severity/level e indexada, caso o campo esteja disponivel.
+loki.process "eventlog" {
   forward_to = [loki.write.central.receiver]
-  rule {
-    target_label = "job"
-    replacement  = "windows-eventlog"
+
+  stage.json {
+    expressions = {
+      level = "level",
+    }
+  }
+  stage.labels {
+    values = {
+      level = "",
+    }
   }
 }
 
