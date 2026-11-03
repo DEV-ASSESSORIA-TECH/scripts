@@ -57,7 +57,14 @@ if (-not $exists -and $Rotate) { throw 'Credencial inexistente. Execute sem -Rot
 $suggested = 'alloy-' + $env:COMPUTERNAME.ToLowerInvariant()
 $username = (Read-Host "Conta de servico [$suggested]").Trim().ToLowerInvariant()
 if (-not $username) { $username = $suggested }
-$securePassword = Read-Host 'Senha do aplicativo' -AsSecureString
+# Get-Credential utiliza um campo de senha nativo no Windows PowerShell,
+# permitindo colar a senha sem expor o conteudo no console.
+$dialog = Get-Credential -UserName $username -Message 'Informe a senha de aplicativo do Alloy'
+if ($null -eq $dialog) { throw 'Operacao cancelada.' }
+if ($dialog.UserName -cne $username) {
+    throw 'A conta informada na janela nao corresponde a conta de servico.'
+}
+$securePassword = $dialog.Password
 $bstr = [IntPtr]::Zero
 $password = $null
 try {
@@ -84,7 +91,7 @@ $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' '
 $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'client_id', $ClientId))
 $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'client_secret', $credential))
 $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'scope', 'profile'))
-$result = Invoke-Post $TokenUrl (New-Object System.Net.Http.FormUrlEncodedContent($form)) 'Teste 1 - OAuth2'
+$result = Invoke-Post $TokenUrl ([System.Net.Http.FormUrlEncodedContent]::new($form)) 'Teste 1 - OAuth2'
 if ($result.Status -ne 200) {
     Write-Host "Teste 1 - OAuth2: HTTP $($result.Status) | REPROVADO - autenticacao negada"
     throw 'Nenhum arquivo local foi alterado.'
@@ -108,9 +115,9 @@ $probe = @{
         values = @(, @($nowNs, 'Teste de autorizacao Alloy'))
     })
 } | ConvertTo-Json -Depth 6 -Compress
-$content = New-Object System.Net.Http.StringContent($probe, [Text.Encoding]::UTF8, 'application/json')
+$content = [System.Net.Http.StringContent]::new($probe, [Text.Encoding]::UTF8, 'application/json')
 $client.DefaultRequestHeaders.Authorization =
-    New-Object System.Net.Http.Headers.AuthenticationHeaderValue('Bearer', $accessToken)
+    [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $accessToken)
 $result = Invoke-Post $LokiUrl $content 'Teste 2 - Loki'
 if ($result.Status -ne 204) {
     Write-Host "Teste 2 - Loki: HTTP $($result.Status) | REPROVADO - ingestao nao confirmada"
@@ -130,10 +137,10 @@ function New-RestrictedAcl([switch]$Directory) {
         New-Object System.Security.AccessControl.FileSecurity
     }
     $acl.SetAccessRuleProtection($true, $false)
-    $admins = New-Object System.Security.Principal.SecurityIdentifier('S-1-5-32-544')
+    $admins = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $acl.SetOwner($admins)
     foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
-        $identity = New-Object System.Security.Principal.SecurityIdentifier($sid)
+        $identity = [System.Security.Principal.SecurityIdentifier]::new($sid)
         if ($Directory) {
             $flags = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
                      [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
