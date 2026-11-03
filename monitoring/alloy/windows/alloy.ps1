@@ -68,8 +68,12 @@ try {
         $ref = $env:ALLOY_REF
         if ($ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or $ref.Contains('..')) { throw "Referencia invalida: $ref" }
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Invoke-WebRequest -UseBasicParsing -OutFile (Join-Path $workDir 'lib\Common.ps1') `
-            -Uri "https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ref/monitoring/alloy/windows/lib/Common.ps1"
+        try {
+            Invoke-WebRequest -UseBasicParsing -OutFile (Join-Path $workDir 'lib\Common.ps1') `
+                -Uri "https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ref/monitoring/alloy/windows/lib/Common.ps1"
+        } catch {
+            throw "Falha ao baixar as bibliotecas (ref $ref): $($_.Exception.Message)"
+        }
     }
     . (Join-Path $src 'lib\Common.ps1')
 
