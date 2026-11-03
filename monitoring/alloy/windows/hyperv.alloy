@@ -1,0 +1,59 @@
+// Modulo opcional Hyper-V para hosts Windows.
+// Requer a funcao Hyper-V ativa (VMMS + root/virtualization/v2).
+// Inclui somente metricas do Hyper-V, sem duplicar a base Windows.
+// O config.alloy principal fornece prometheus.remote_write.central,
+// loki.process.eventlog e loki.write.central.
+
+prometheus.exporter.windows "hyperv" {
+  enabled_collectors = ["hyperv"]
+}
+
+discovery.relabel "hyperv" {
+  targets = prometheus.exporter.windows.hyperv.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "integrations/hyperv"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = string.to_lower(constants.hostname)
+  }
+  rule {
+    target_label = "host"
+    replacement  = string.to_lower(constants.hostname)
+  }
+}
+
+prometheus.scrape "hyperv" {
+  targets         = discovery.relabel.hyperv.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+// Eventos administrativos de gerenciamento de VMs.
+// A captura de eventos do sistema convidado permanece responsabilidade
+// do agente instalado dentro de cada VM.
+loki.source.windowsevent "hyperv_vmms_admin" {
+  eventlog_name          = "Microsoft-Windows-Hyper-V-VMMS-Admin"
+  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\hyperv-vmms-admin.xml"
+  use_incoming_timestamp = true
+  labels = {
+    host    = string.to_lower(constants.hostname),
+    channel = "Microsoft-Windows-Hyper-V-VMMS-Admin",
+    job     = "hyperv-eventlog",
+  }
+  forward_to = [loki.process.eventlog.receiver]
+}
+
+loki.source.windowsevent "hyperv_worker_admin" {
+  eventlog_name          = "Microsoft-Windows-Hyper-V-Worker-Admin"
+  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\hyperv-worker-admin.xml"
+  use_incoming_timestamp = true
+  labels = {
+    host    = string.to_lower(constants.hostname),
+    channel = "Microsoft-Windows-Hyper-V-Worker-Admin",
+    job     = "hyperv-eventlog",
+  }
+  forward_to = [loki.process.eventlog.receiver]
+}
