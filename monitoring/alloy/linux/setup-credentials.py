@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -44,15 +45,16 @@ def main():
     if os.path.lexists(SECRET):
         raise SystemExit("Credencial ja existe; nada foi sobrescrito.")
 
-    # O comando usa heredoc; stdin nao e interativo. Ler diretamente do TTY.
+    if not sys.stdin.isatty():
+    raise SystemExit("Execute em um terminal interativo (TTY).")
+
     try:
-        with open("/dev/tty", "r+") as tty:
-            tty.write("Conta de servico (alloy-<hostname>): ")
-            tty.flush()
-            username = tty.readline().strip()
-            password = getpass.getpass("Senha do aplicativo: ", stream=tty)
-    except OSError:
-        raise SystemExit("Execute em um terminal interativo (TTY).") from None
+        username = input("Conta de servico (alloy-<hostname>): ").strip()
+        password = getpass.getpass("Senha do aplicativo: ")
+    except (EOFError, KeyboardInterrupt):
+        raise SystemExit("\nOperacao cancelada; nenhum arquivo alterado.") from None
+    except OSError as exc:
+        raise SystemExit(f"Erro ao acessar o terminal: {exc}") from None
 
     if not re.fullmatch(r"alloy-[a-z0-9][a-z0-9-]*", username) or not password:
         raise SystemExit("Usuario ou senha invalidos; nenhum arquivo alterado.")
