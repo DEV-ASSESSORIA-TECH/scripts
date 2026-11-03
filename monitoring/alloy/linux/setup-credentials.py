@@ -5,6 +5,9 @@ import os
 import re
 import time
 import sys
+import termios
+import tty
+import readline
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -36,6 +39,43 @@ def post(url, body, headers, label):
         print(f"{label}: HTTP sem resposta | ERRO de rede/TLS ({type(exc).__name__})")
         raise SystemExit("Nenhum arquivo local foi alterado.") from None
 
+def getpass_masked(prompt="Senha do aplicativo: "):
+    fd = os.open("/dev/tty", os.O_RDWR)
+    old_settings = termios.tcgetattr(fd)
+    password = bytearray()
+
+    try:
+        os.write(fd, prompt.encode())
+        tty.setcbreak(fd)
+
+        while True:
+            char = os.read(fd, 1)
+
+            if not char:
+                raise EOFError
+
+            if char in (b"\r", b"\n"):
+                break
+
+            if char in (b"\x08", b"\x7f"):
+                if password:
+                    password.pop()
+                    os.write(fd, b"\b \b")
+                continue
+
+            if char == b"\x03":
+                raise KeyboardInterrupt
+
+            if char[0] >= 32 and char != b"\x7f":
+                password.extend(char)
+                os.write(fd, b"*")
+
+        return password.decode("utf-8")
+
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        os.write(fd, b"\n")
+        os.close(fd)
 
 def main():
     if os.geteuid() != 0:
@@ -50,7 +90,7 @@ def main():
 
     try:
         username = input("Conta de servico (alloy-<hostname>): ").strip()
-        password = getpass.getpass("Senha do aplicativo: ")
+        password = getpass_masked()
     except (EOFError, KeyboardInterrupt):
         raise SystemExit("\nOperacao cancelada; nenhum arquivo alterado.") from None
     except OSError as exc:
