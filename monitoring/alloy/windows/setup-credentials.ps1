@@ -54,7 +54,21 @@ if ($exists -and -not (Test-Path -LiteralPath $Secret -PathType Leaf)) {
 if ($exists -and -not $Rotate) { throw 'Credencial ja existe. Use -Rotate para substituir.' }
 if (-not $exists -and $Rotate) { throw 'Credencial inexistente. Execute sem -Rotate.' }
 
-$suggested = 'alloy-' + $env:COMPUTERNAME.ToLowerInvariant()
+# COMPUTERNAME usa o nome NetBIOS (maximo 15 caracteres).
+# Usar DNSHostName para nao truncar nomes como SRV-CONTABIL-ASS.
+$hostName = $null
+try {
+    $hostName = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).DNSHostName
+} catch {
+    # Fallback para o NetBIOS; o nome pode ser corrigido manualmente.
+}
+if ([string]::IsNullOrWhiteSpace($hostName)) {
+    $hostName = $env:COMPUTERNAME
+}
+if ([string]::IsNullOrWhiteSpace($hostName)) {
+    throw 'Nao foi possivel identificar o hostname do Windows.'
+}
+$suggested = 'alloy-' + $hostName.Trim().ToLowerInvariant()
 $username = (Read-Host "Conta de servico [$suggested]").Trim().ToLowerInvariant()
 if (-not $username) { $username = $suggested }
 # Get-Credential utiliza um campo de senha nativo no Windows PowerShell,
@@ -94,6 +108,31 @@ $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' '
 $result = Invoke-Post $TokenUrl ([System.Net.Http.FormUrlEncodedContent]::new($form)) 'Teste 1 - OAuth2'
 if ($result.Status -ne 200) {
     Write-Host "Teste 1 - OAuth2: HTTP $($result.Status) | REPROVADO - autenticacao negada"
+    # Exibir somente os campos OAuth2 de erro, nunca o corpo HTTP completo.
+    # Sanitizar valores sensiveis, caracteres de controle e mensagens longas.
+    try {
+        $oauthError = ConvertFrom-Json -InputObject $result.Body -ErrorAction Stop
+        $errorCode = [string]$oauthError.error
+        if ($errorCode -match '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$') {
+            Write-Host "OAuth2 - codigo: $errorCode"
+        }
+        $errorDescription = [string]$oauthError.error_description
+        if (-not $errorDescription -and $oauthError.detail -is [string]) {
+            $errorDescription = [string]$oauthError.detail
+        }
+        if (-not [string]::IsNullOrWhiteSpace($errorDescription)) {
+            $errorDescription = ($errorDescription -replace '[\x00-\x1f\x7f]+', ' ').Trim()
+            $errorDescription = $errorDescription.Replace($credential, '[credencial omitida]')
+            $errorDescription = $errorDescription -replace '(?i)\b(Bearer|Basic)\s+[a-zA-Z0-9+/_=-]{8,}', '$1 [omitido]'
+            $errorDescription = $errorDescription -replace '(?i)\b(client_secret|access_token|refresh_token|id_token|password|senha)\s*[:=]\s*[^\s,;]+', '$1=[omitido]'
+            if ($errorDescription.Length -gt 200) {
+                $errorDescription = $errorDescription.Substring(0, 200) + '...'
+            }
+            Write-Host "OAuth2 - descricao: $errorDescription"
+        }
+    } catch {
+        Write-Host 'OAuth2 - detalhes indisponiveis (resposta nao e JSON valido).'
+    }
     throw 'Nenhum arquivo local foi alterado.'
 }
 try {
