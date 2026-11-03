@@ -46,7 +46,7 @@ def main():
         raise SystemExit("Credencial ja existe; nada foi sobrescrito.")
 
     if not sys.stdin.isatty():
-    raise SystemExit("Execute em um terminal interativo (TTY).")
+        raise SystemExit("Execute em um terminal interativo (TTY).")
 
     try:
         username = input("Conta de servico (alloy-<hostname>): ").strip()
