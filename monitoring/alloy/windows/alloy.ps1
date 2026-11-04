@@ -76,6 +76,9 @@ try {
         }
     }
     . (Join-Path $src 'lib\Common.ps1')
+    Save-RemoteFiles $src @('lib/State.ps1', 'lib/Ui.ps1')
+    . (Join-Path $src 'lib\Ui.ps1')
+    . (Join-Path $src 'lib\State.ps1')
 
     # -------------------------------------------------------------- operacoes
     # Os scripts filhos rodam com seus proprios controles de erro e rollback;
@@ -95,9 +98,9 @@ try {
         if (-not (Test-CredentialPresent)) {
             # Os tres arquivos com o mesmo cliente HTTP, antes da etapa 1.
             Save-RemoteFiles $src @('setup-credentials.ps1', 'install.ps1', 'config.alloy')
-            Write-Log 'Etapa 1/2 - Credencial'
+            Write-UiSection 'ETAPA 1/2 - CREDENCIAL'
             Invoke-Credentials
-            Write-Log 'Etapa 2/2 - Instalacao'
+            Write-UiSection 'ETAPA 2/2 - INSTALACAO'
         }
         Invoke-Installer $Arguments
     }
@@ -145,73 +148,99 @@ try {
     }
 
     function Invoke-FirstInstall {
+        Clear-UiScreen
+        Write-UiBanner (Get-AlloyHostName)
+        Write-Host '  Primeira instalacao neste servidor.'
         Write-Host ''
-        Write-Host " Alloy - primeira instalacao em $(Get-AlloyHostName)"
-        Write-Host ' 1) Setup da credencial: conta alloy-<hostname> + senha de aplicativo,'
-        Write-Host '    validadas com OAuth2 e Loki antes de gravar.'
-        Write-Host ' 2) Instalacao do Alloy e aplicacao da configuracao.'
+        Write-UiText '  [1/2] Credencial' 'White' -NoNewline
+        Write-Host '   conta alloy-<hostname> + senha de aplicativo,'
+        Write-Host '                     validada (OAuth2 + Loki) antes de gravar'
+        Write-UiText '  [2/2] Instalacao' 'White' -NoNewline
+        Write-Host '   Alloy + configuracao, com validacao e rollback'
         Write-Host ''
-        if (-not (Confirm-Choice 'Continuar?')) { Write-Log 'Cancelado; nada foi alterado.'; return }
+        if (-not (Confirm-Choice '  Continuar?')) { Write-Log 'Cancelado; nada foi alterado.'; return }
         Invoke-Install
-        Write-Log 'Para gerenciar este servidor depois, execute o mesmo comando: o menu sera exibido.'
+        Write-Host ''
+        $script:LastStatus = 'ok'
+        $script:LastAction = "Primeira instalacao - concluida ($(Get-Date -Format 'HH:mm'))"
+        Show-AlloyHeader
+        Write-Host '  Para gerenciar este servidor depois, execute o mesmo comando.'
     }
 
-    function Invoke-MenuAction([scriptblock]$Action) {
+    # Tela propria para a acao, resultado e "ultima acao" no cabecalho.
+    function Invoke-Screen([string]$Title, [scriptblock]$Action) {
+        Clear-UiScreen
+        Write-UiSection $Title.ToUpperInvariant()
         Write-Host ''
         try {
             & $Action
-            Write-Ok 'Concluido.'
+            $script:LastStatus = 'ok'
+            $script:LastAction = "$Title - concluido ($(Get-Date -Format 'HH:mm'))"
+            Write-Host ''
+            Write-Host '  ' -NoNewline; Write-UiBadge 'ok'; Write-Host ' Concluido.'
         } catch {
-            Write-Warn "A operacao nao foi concluida: $($_.Exception.Message)"
+            $script:LastStatus = 'err'
+            $script:LastAction = "$Title - falhou ($(Get-Date -Format 'HH:mm'))"
+            Write-Host ''
+            Write-Host '  ' -NoNewline; Write-UiBadge 'err'; Write-Host " $($_.Exception.Message)"
         }
+        Wait-UiKey
     }
 
     function Show-Menu {
         while ($true) {
-            Show-AlloyHeader
+            $installed = Test-AlloyInstalled
             $default = ''
-            if (-not (Test-AlloyInstalled) -or -not (Test-AlloyRunning)) { $default = '1' }
+            if (-not $installed -or -not (Test-AlloyRunning)) { $default = '1' }
+            $label1 = if ($installed) { 'Reaplicar configuracao' } else { 'Instalar Alloy' }
+            $color2 = ''
             if (Test-HyperVModule) {
-                $hypervLabel = 'Desativar modulo Hyper-V'; $hypervTarget = 'none'
+                $label2 = 'Desativar Hyper-V'; $hypervTarget = 'none'
             } else {
-                $hypervLabel = 'Ativar modulo Hyper-V'; $hypervTarget = 'hyperv'
-                if (-not (Get-Service -Name vmms -ErrorAction SilentlyContinue)) { $hypervLabel += ' (Hyper-V nao detectado)' }
+                $label2 = 'Ativar Hyper-V'; $hypervTarget = 'hyperv'
+                if (-not (Get-Service -Name vmms -ErrorAction SilentlyContinue)) { $label2 += ' (ausente)'; $color2 = 'DarkGray' }
             }
-            $credLabel = if (Test-CredentialPresent) { 'Rotacionar credencial' } else { 'Configurar credencial' }
+            $label5 = if (Test-CredentialPresent) { 'Rotacionar' } else { 'Configurar' }
+            $color1 = if ($default) { 'Green' } else { '' }
 
-            Write-Host ' 1) Instalar / reaplicar configuracao' -NoNewline
-            if ($default) { Write-Host ' (recomendado)' -ForegroundColor Green } else { Write-Host '' }
-            Write-Host " 2) $hypervLabel"
-            Write-Host ' 3) Atualizar o Alloy'
-            Write-Host ' 4) Testar credencial (sem gravar)'
-            Write-Host " 5) $credLabel"
-            Write-Host ' 6) Diagnostico'
-            Write-Host ' 7) Desinstalar (mantem credencial e configuracao)'
-            Write-Host ' 8) Limpeza completa'
-            Write-Host ' 0) Sair'
+            Clear-UiScreen
+            Show-AlloyHeader
+            Write-UiColumns 'INSTALACAO' 'White' 'CREDENCIAL' 'White'
+            Write-UiColumns " [1] $label1" $color1 ' [4] Testar' ''
+            Write-UiColumns " [2] $label2" $color2 " [5] $label5" ''
+            Write-UiColumns ' [3] Atualizar Alloy' '' '' ''
             Write-Host ''
-            $prompt = if ($default) { "Opcao [$default]" } else { 'Opcao' }
-            $choice = (Read-Host $prompt).Trim()
-            if (-not $choice) { $choice = $default }
-            # "continue" dentro de switch nao volta ao while: usar $pause.
-            $pause = $true
+            Write-UiColumns 'DIAGNOSTICO' 'White' 'REMOCAO' 'White'
+            Write-UiColumns ' [6] Ver diagnostico' '' ' [7] Desinstalar' 'Red'
+            Write-UiColumns '' '' ' [8] Limpeza completa' 'Red'
+            Write-UiRule '-'
+            $prompt = if ($default) { "Tecle a opcao (Enter = $default, 0 sai)" } else { 'Tecle a opcao (0 sai)' }
+            $choice = Read-UiKey $prompt
+            if ($choice -eq '') { $choice = $default }
             switch ($choice) {
-                '1' { Invoke-MenuAction { Invoke-Install } }
-                '2' { Invoke-MenuAction { Invoke-Modules $hypervTarget } }
-                '3' { Invoke-MenuAction { Invoke-Upgrade } }
-                '4' { Invoke-MenuAction { Invoke-Check } }
+                '1' { Invoke-Screen $label1 { Invoke-Install } }
+                '2' { Invoke-Screen $label2 { Invoke-Modules $hypervTarget } }
+                '3' { Invoke-Screen 'Atualizar Alloy' { Invoke-Upgrade } }
+                '4' { Invoke-Screen 'Testar credencial' { Invoke-Check } }
                 '5' {
-                    if (Test-CredentialPresent) { Invoke-MenuAction { Invoke-Rotate } }
-                    else { Invoke-MenuAction { Invoke-SetupCredentials } }
+                    if (Test-CredentialPresent) { Invoke-Screen 'Rotacionar credencial' { Invoke-Rotate } }
+                    else { Invoke-Screen 'Configurar credencial' { Invoke-SetupCredentials } }
                 }
-                '6' { Write-Host ''; Show-AlloyDiagnostics }
-                '7' { Invoke-MenuAction { Invoke-Uninstall } }
-                '8' { Invoke-MenuAction { Invoke-Uninstall @{ Purge = $true } } }
-                { $_ -in @('0', 'q', 'sair') } { return }
-                '' { $pause = $false }
-                default { Write-Warn "Opcao invalida: $choice"; $pause = $false }
+                '6' {
+                    Clear-UiScreen
+                    Write-UiBanner (Get-AlloyHostName)
+                    Show-AlloyDiagnostics
+                    Wait-UiKey
+                }
+                '7' { Invoke-Screen 'Desinstalar' { Invoke-Uninstall } }
+                '8' { Invoke-Screen 'Limpeza completa' { Invoke-Uninstall @{ Purge = $true } } }
+                { $_ -in @('0', 'q', 'Q') } {
+                    Clear-UiScreen
+                    Show-AlloySummary
+                    Write-Host '  Para abrir o menu de novo, execute o mesmo comando.'
+                    return
+                }
             }
-            if ($pause) { $null = Read-Host "`nEnter para voltar ao menu" }
         }
     }
 
@@ -232,7 +261,7 @@ try {
         'rotate' { Invoke-Rotate }
         'modules' { Invoke-Modules $Modules }
         'upgrade' { Invoke-Upgrade }
-        'status' { Show-AlloyDiagnostics }
+        'status' { Write-UiBanner (Get-AlloyHostName); Show-AlloySummary; Show-AlloyDiagnostics }
         'uninstall' { Invoke-Uninstall @{ Yes = [bool]$Yes } }
         'purge' { Invoke-Uninstall @{ Purge = $true; Yes = [bool]$Yes } }
     }

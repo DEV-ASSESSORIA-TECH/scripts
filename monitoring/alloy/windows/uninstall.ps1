@@ -10,16 +10,10 @@ param([switch]$Purge, [switch]$Yes)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\Common.ps1')
-
-$UninstallKeys = @(
-    'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
-    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
-)
+. (Join-Path $PSScriptRoot 'lib\State.ps1')
 
 function Find-AlloyUninstaller {
-    $entry = Get-ItemProperty -Path $UninstallKeys -ErrorAction SilentlyContinue |
-        Where-Object { $_.DisplayName -like '*Alloy*' -and $_.Publisher -like '*Grafana*' } |
-        Select-Object -First 1
+    $entry = Get-AlloyUninstallEntry
     if ($entry -and $entry.UninstallString) {
         $path = $entry.UninstallString.Trim()
         if ($path -match '^"([^"]+)"') { $path = $Matches[1] } else { $path = ($path -split '\s+/')[0] }
