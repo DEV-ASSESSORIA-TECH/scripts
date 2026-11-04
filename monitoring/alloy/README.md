@@ -7,21 +7,30 @@ Um único comando abre a ferramenta. Na primeira execução, ele segue direto o
 fluxo de credencial e depois a instalação. Nas seguintes, abre um menu:
 
 ```
- Alloy - srv-web  (ref main)
- Servico ..... ativo, pronto (v1.11.2, usuario alloy)
- Credencial .. presente (alloy-srv-web)
- Modulos ..... Linux
+ ==============================================================
+  GRAFANA ALLOY                                        srv-web
+ ==============================================================
+  Servico      [ OK ]  ativo e pronto         v1.11.2
+  Credencial   [ OK ]  alloy-srv-web
+  Modulos              Linux
+  Ultima acao  [ OK ]  Testar credencial - concluido (10:42)
+ --------------------------------------------------------------
+  INSTALACAO                    CREDENCIAL
+   [1] Reaplicar configuracao    [4] Testar
+   [2] Ativar Docker             [5] Rotacionar
+   [3] Atualizar Alloy
 
- 1) Instalar / reaplicar configuracao
- 2) Ativar modulo Docker
- 3) Atualizar o Alloy
- 4) Testar credencial (sem gravar)
- 5) Rotacionar credencial
- 6) Diagnostico
- 7) Desinstalar (mantem credencial e configuracao)
- 8) Limpeza completa
- 0) Sair
+  DIAGNOSTICO                   REMOCAO
+   [6] Ver diagnostico           [7] Desinstalar
+                                 [8] Limpeza completa
+ --------------------------------------------------------------
+  Tecle a opcao (0 sai):
 ```
+
+As opções são escolhidas com uma tecla, sem Enter. Quando o serviço não
+está instalado ou está parado, Enter executa a opção recomendada ([1]). O
+diagnóstico mostra avisos e erros das últimas 24h, a conectividade com
+`auth` e `mon` e links do Grafana Explore já filtrados pelo host.
 
 ## Executar
 
@@ -74,7 +83,9 @@ operação precisa. Executado a partir de um clone, usa os arquivos locais.
 | Arquivo | Função |
 |---------|--------|
 | `alloy.sh` / `alloy.ps1` | ponto de entrada: menu e comandos |
-| `lib/` | funções compartilhadas: saída, download, estado e diagnóstico |
+| `lib/common.*` | constantes, saída e download |
+| `lib/state.*` | estado do servidor, cabeçalho e diagnóstico |
+| `lib/ui.*` | interface do terminal: telas, marcadores, menu e teclas |
 | `setup-credentials.*` | valida a conta de serviço (OAuth2 + Loki) e grava a credencial |
 | `install.*` | instala o Alloy e aplica a configuração, com validação e rollback |
 | `uninstall.*` | desinstalação e limpeza completa |
