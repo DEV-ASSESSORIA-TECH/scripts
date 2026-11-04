@@ -18,6 +18,10 @@ DATA_DIR=/var/lib/alloy
 APT_SOURCE=/etc/apt/sources.list.d/grafana.list
 APT_KEY=/etc/apt/keyrings/grafana.asc
 READY_URL=http://127.0.0.1:12345/-/ready
+# Links do diagnostico. Datasource por nome ou UID, como cadastrado no Grafana.
+GRAFANA_URL=https://mon.assessoriatech.com/grafana
+GRAFANA_DS_METRICS=Prometheus
+GRAFANA_DS_LOGS=Loki
 
 if [[ -t 1 ]]; then
   C_BOLD=$'\e[1m' C_OK=$'\e[32m' C_WARN=$'\e[33m' C_ERR=$'\e[31m' C_DIM=$'\e[2m' C_RESET=$'\e[0m'

@@ -71,11 +71,14 @@ else
   mkdir -p -- "$src/lib"
   curl -fsSL --proto '=https' --fail-early --connect-timeout 10 --retry 2 \
     -o "$src/lib/common.sh" "$raw/lib/common.sh" \
-    -o "$src/lib/state.sh" "$raw/lib/state.sh" ||
+    -o "$src/lib/state.sh" "$raw/lib/state.sh" \
+    -o "$src/lib/ui.sh" "$raw/lib/ui.sh" ||
     { printf '[Alloy] ERRO: falha ao baixar as bibliotecas (ref %s).\n' "$ALLOY_REF" >&2; exit 1; }
 fi
 # shellcheck source=lib/common.sh
 source "$src/lib/common.sh"
+# shellcheck source=lib/ui.sh
+source "$src/lib/ui.sh"
 # shellcheck source=lib/state.sh
 source "$src/lib/state.sh"
 
@@ -100,9 +103,9 @@ do_install() {
   if ! credential_present; then
     # Uma unica chamada de download para as duas etapas.
     fetch "$src" setup-credentials.py install.sh config.alloy || return 1
-    log "${C_BOLD}Etapa 1/2 - Credencial${C_RESET}"
+    ui_section 'ETAPA 1/2 - CREDENCIAL'
     run_credentials || return 1
-    log "${C_BOLD}Etapa 2/2 - Instalacao${C_RESET}"
+    ui_section 'ETAPA 2/2 - INSTALACAO'
   fi
   run_installer "$@"
 }
@@ -157,65 +160,97 @@ do_uninstall() {
 need_tty() { [[ -t 0 ]] || fail 'Sem terminal interativo: informe um comando (veja --help).'; }
 
 first_install() {
-  printf '\n %sAlloy - primeira instalacao em %s%s\n' "$C_BOLD" "$(host_name)" "$C_RESET"
-  printf ' 1) Setup da credencial: conta alloy-<hostname> + senha de aplicativo,\n'
-  printf '    validadas com OAuth2 e Loki antes de gravar.\n'
-  printf ' 2) Instalacao do Alloy e aplicacao da configuracao.\n\n'
-  confirm 'Continuar?' || { log 'Cancelado; nada foi alterado.'; return 0; }
+  ui_clear
+  ui_banner "$(host_name)"
+  printf '  Primeira instalacao neste servidor.\n\n'
+  printf '  %s[1/2] Credencial%s   conta alloy-<hostname> + senha de aplicativo,\n' "$C_BOLD" "$C_RESET"
+  printf '                     validada (OAuth2 + Loki) antes de gravar\n'
+  printf '  %s[2/2] Instalacao%s   Alloy + configuracao, com validacao e rollback\n\n' "$C_BOLD" "$C_RESET"
+  confirm '  Continuar?' || { log 'Cancelado; nada foi alterado.'; return 0; }
   do_install || return 1
-  log 'Para gerenciar este servidor depois, execute o mesmo comando: o menu sera exibido.'
+  printf '\n'
+  LAST_STATUS=ok LAST_ACTION="Primeira instalacao - concluida ($(date +%H:%M))"
+  print_header
+  printf '  Para gerenciar este servidor depois, execute o mesmo comando.\n'
 }
 
-run_action() {
+# run_screen TITULO FUNCAO [ARGS...]: tela propria, resultado e "ultima acao".
+run_screen() {
+  local title=$1
+  shift
+  ui_clear
+  ui_section "$(tr '[:lower:]' '[:upper:]' <<<"$title")"
   printf '\n'
   if "$@"; then
-    ok 'Concluido.'
+    LAST_STATUS=ok LAST_ACTION="$title - concluido ($(date +%H:%M))"
+    printf '\n  %s Concluido.\n' "$(ui_badge ok)"
   else
-    warn 'A operacao nao foi concluida.'
+    LAST_STATUS=err LAST_ACTION="$title - falhou ($(date +%H:%M))"
+    printf '\n  %s A operacao nao foi concluida.\n' "$(ui_badge err)"
   fi
+  ui_pause
 }
 
-pause() { read -r -p $'\nEnter para voltar ao menu...' _ || true; }
+view_screen() {
+  ui_clear
+  ui_banner "$(host_name)"
+  "$@"
+  ui_pause
+}
 
 menu() {
-  local choice default docker_label docker_target cred_label
+  local default label1 label2 color2 docker_target label5 prompt
   while :; do
-    print_header
     default=''
     if ! alloy_installed || ! service_active; then default=1; fi
+    if alloy_installed; then label1='Reaplicar configuracao'; else label1='Instalar Alloy'; fi
+    color2=''
     if docker_module; then
-      docker_label='Desativar modulo Docker'; docker_target=none
+      label2='Desativar Docker'; docker_target=none
     else
-      docker_label='Ativar modulo Docker'; docker_target=docker
-      docker_available || docker_label+=" ${C_DIM}(Docker nao detectado)${C_RESET}"
+      label2='Ativar Docker'; docker_target=docker
+      if ! docker_available; then label2+=' (ausente)'; color2=$C_DIM; fi
     fi
-    if credential_present; then cred_label='Rotacionar credencial'; else cred_label='Configurar credencial'; fi
+    if credential_present; then label5='Rotacionar'; else label5='Configurar'; fi
 
-    printf ' 1) Instalar / reaplicar configuracao%s\n' "${default:+ ${C_OK}(recomendado)${C_RESET}}"
-    printf ' 2) %s\n' "$docker_label"
-    printf ' 3) Atualizar o Alloy\n'
-    printf ' 4) Testar credencial (sem gravar)\n'
-    printf ' 5) %s\n' "$cred_label"
-    printf ' 6) Diagnostico\n'
-    printf ' 7) Desinstalar (mantem credencial e configuracao)\n'
-    printf ' 8) Limpeza completa\n'
-    printf ' 0) Sair\n\n'
-    read -r -p "Opcao${default:+ [$default]}: " choice || { printf '\n'; return 0; }
-    choice=${choice:-$default}
-    case "$choice" in
-      1) run_action do_install ;;
-      2) run_action do_modules "$docker_target" ;;
-      3) run_action do_upgrade ;;
-      4) run_action do_check ;;
-      5) if credential_present; then run_action do_rotate; else run_action do_setup_credentials; fi ;;
-      6) printf '\n'; diagnose ;;
-      7) run_action do_uninstall ;;
-      8) run_action do_uninstall --purge ;;
-      0|q|Q|sair) return 0 ;;
-      '') continue ;;
-      *) warn "Opcao invalida: $choice"; continue ;;
+    ui_clear
+    print_header
+    ui_columns 'INSTALACAO' "$C_BOLD" 'CREDENCIAL' "$C_BOLD"
+    ui_columns " [1] $label1" "${default:+$C_OK}" ' [4] Testar' ''
+    ui_columns " [2] $label2" "$color2" " [5] $label5" ''
+    ui_columns ' [3] Atualizar Alloy' '' '' ''
+    printf '\n'
+    ui_columns 'DIAGNOSTICO' "$C_BOLD" 'REMOCAO' "$C_BOLD"
+    ui_columns ' [6] Ver diagnostico' '' ' [7] Desinstalar' "$C_ERR"
+    ui_columns '' '' ' [8] Limpeza completa' "$C_ERR"
+    ui_rule -
+    prompt='Tecle a opcao (0 sai)'
+    [[ -n $default ]] && prompt="Tecle a opcao (Enter = $default, 0 sai)"
+    printf '  %s: ' "$prompt"
+    ui_readkey || { printf '\n'; return 0; }
+    [[ -z $UI_KEY ]] && UI_KEY=$default
+    [[ $UI_KEY == ESC ]] || printf '%s' "$UI_KEY"
+    printf '\n'
+    case "$UI_KEY" in
+      1) run_screen "$label1" do_install ;;
+      2) run_screen "$label2" do_modules "$docker_target" ;;
+      3) run_screen 'Atualizar Alloy' do_upgrade ;;
+      4) run_screen 'Testar credencial' do_check ;;
+      5) if credential_present; then
+           run_screen 'Rotacionar credencial' do_rotate
+         else
+           run_screen 'Configurar credencial' do_setup_credentials
+         fi ;;
+      6) view_screen diagnose ;;
+      7) run_screen 'Desinstalar' do_uninstall ;;
+      8) run_screen 'Limpeza completa' do_uninstall --purge ;;
+      0|q|Q)
+        ui_clear
+        print_summary
+        printf '  Para abrir o menu de novo, execute o mesmo comando.\n'
+        return 0 ;;
+      *) ;;
     esac
-    pause
   done
 }
 
@@ -231,7 +266,7 @@ case "$command" in
   rotate) do_rotate ;;
   modules) do_modules "${cmd_args[@]}" ;;
   upgrade) do_upgrade ;;
-  status) diagnose ;;
+  status) ui_banner "$(host_name)"; print_summary; diagnose ;;
   uninstall) do_uninstall "${cmd_args[@]}" ;;
   purge) do_uninstall --purge "${cmd_args[@]}" ;;
   *) usage >&2; fail "Comando desconhecido: $command" ;;

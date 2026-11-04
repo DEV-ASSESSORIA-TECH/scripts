@@ -1,6 +1,6 @@
 # shellcheck shell=bash
-# Leitura do estado local do Alloy (sem alterar nada) e diagnostico.
-# Requer lib/common.sh.
+# Leitura do estado local do Alloy (sem alterar nada), cabecalho e diagnostico.
+# Requer lib/common.sh e lib/ui.sh.
 
 host_name() {
   local name
@@ -40,65 +40,131 @@ wait_ready() {
   return 1
 }
 
-print_header() {
-  local svc cred mods user origin
+# Estado do servico em "marcador|texto" para o cabecalho e o diagnostico.
+service_status() {
   if ! alloy_installed; then
-    svc="${C_DIM}nao instalado${C_RESET}"
+    printf 'off|nao instalado'
   elif service_active; then
-    user=$(service_user)
-    if service_ready; then
-      svc="${C_OK}ativo, pronto${C_RESET} (v$(alloy_version), usuario ${user:-alloy})"
-    else
-      svc="${C_WARN}ativo, nao pronto${C_RESET} (v$(alloy_version))"
-    fi
+    if service_ready; then printf 'ok|ativo e pronto'; else printf 'warn|ativo, nao pronto'; fi
   else
-    svc="${C_ERR}parado${C_RESET} (v$(alloy_version))"
+    printf 'err|parado'
   fi
+}
+
+# LAST_STATUS/LAST_ACTION sao definidos pelo menu do alloy.sh.
+print_header() {
+  local status badge text cred_badge cred_text mods
+  status=$(service_status)
+  badge=${status%%|*}
+  text=${status#*|}
+  alloy_installed && text=$(printf '%-22s v%s' "$text" "$(alloy_version)")
   if credential_present; then
-    cred="${C_OK}presente${C_RESET} ($(credential_user || printf 'conta ilegivel'))"
+    cred_badge=ok
+    cred_text=$(credential_user || printf 'presente (conta ilegivel)')
   else
-    cred="${C_WARN}ausente${C_RESET}"
+    cred_badge=warn
+    cred_text=ausente
   fi
   mods=Linux
-  docker_module && mods+=' + Docker'
-  origin="ref $ALLOY_REF"
-  [[ $ALLOY_LOCAL == 1 ]] && origin='arquivos locais'
-  printf '\n %sAlloy - %s%s  %s(%s)%s\n' "$C_BOLD" "$(host_name)" "$C_RESET" "$C_DIM" "$origin" "$C_RESET"
-  printf ' Servico ..... %s\n' "$svc"
-  printf ' Credencial .. %s\n' "$cred"
-  printf ' Modulos ..... %s\n\n' "$mods"
+  if docker_module; then mods+=' + Docker'; fi
+
+  ui_banner "$(host_name)"
+  ui_row Servico "$badge" "$text"
+  ui_row Credencial "$cred_badge" "$cred_text"
+  ui_row Modulos none "$mods"
+  if [[ $ALLOY_LOCAL == 1 ]]; then
+    ui_row Origem none 'arquivos locais'
+  elif [[ $ALLOY_REF != main ]]; then
+    ui_row Origem none "ref $ALLOY_REF"
+  fi
+  if [[ -n ${LAST_ACTION:-} ]]; then
+    ui_row 'Ultima acao' "${LAST_STATUS:-none}" "$LAST_ACTION"
+  fi
+  ui_rule -
+}
+
+# Resumo de uma linha (saida do menu e comandos diretos).
+print_summary() {
+  local status
+  status=$(service_status)
+  printf '  Alloy %s %s' "$(ui_badge "${status%%|*}")" "${status#*|}"
+  if credential_present; then printf '  |  credencial %s' "$(credential_user || printf 'presente')"; fi
+  printf '\n'
 }
 
 # Teste de alcance: qualquer resposta HTTP comprova DNS, rota e TLS.
 check_endpoint() {
   local code
-  code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "$1" 2>/dev/null) || code=000
+  code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "https://$2/" 2>/dev/null) || code=000
   if [[ $code == 000 ]]; then
-    printf '   %-36s %sSEM RESPOSTA%s (DNS, rota ou TLS)\n' "$1" "$C_ERR" "$C_RESET"
+    ui_row "$1" err "$2 - sem resposta (DNS, rota ou TLS)"
   else
-    printf '   %-36s %sOK%s (HTTP %s)\n' "$1" "$C_OK" "$C_RESET" "$code"
+    ui_row "$1" ok "$2 - HTTP $code"
   fi
 }
 
+# Link do Explore ja filtrado (ultima 1h). Uso: explore_url DATASOURCE CONSULTA
+explore_url() {
+  python3 -c '
+import json, sys, urllib.parse
+base, ds, expr = sys.argv[1:4]
+panes = {"a": {"datasource": ds, "queries": [{"refId": "A", "expr": expr}],
+               "range": {"from": "now-1h", "to": "now"}}}
+print(base + "/explore?schemaVersion=1&orgId=1&panes="
+      + urllib.parse.quote(json.dumps(panes, separators=(",", ":")), safe=""))
+' "$GRAFANA_URL" "$1" "$2"
+}
+
+print_query() { # print_query ROTULO DATASOURCE CONSULTA
+  ui_row "$1" none "$3"
+  printf '                       %s%s%s\n' "$C_DIM" "$(explore_url "$2" "$3")" "$C_RESET"
+}
+
 diagnose() {
-  local host
+  local host status since files issues count
   host=$(host_name)
-  print_header
+
+  ui_section SERVICO
+  status=$(service_status)
   if alloy_installed; then
-    printf '%s-- Servico%s\n' "$C_BOLD" "$C_RESET"
-    systemctl --no-pager --full status alloy 2>&1 | head -n 12 || true
-    printf '\n%s-- Ultimos logs (40 linhas)%s\n' "$C_BOLD" "$C_RESET"
-    journalctl -u alloy -n 40 --no-pager 2>&1 || true
+    ui_row Estado "${status%%|*}" "${status#*|} ($(systemctl is-enabled alloy 2>/dev/null || printf '?'))"
+    ui_row Versao none "v$(alloy_version)"
+    since=$(systemctl show alloy --property=ActiveEnterTimestamp --value 2>/dev/null || true)
+    if service_active && [[ -n $since ]]; then ui_row Desde none "$since"; fi
+    ui_row Usuario none "$(service_user)"
+  else
+    ui_row Estado off 'nao instalado'
   fi
-  printf '\n%s-- Conectividade%s\n' "$C_BOLD" "$C_RESET"
-  check_endpoint https://auth.assessoriatech.com/
-  check_endpoint https://mon.assessoriatech.com/
-  printf '\n%s-- Consultas no Grafana (Explore)%s\n' "$C_BOLD" "$C_RESET"
-  printf '   Prometheus: up{job="integrations/unix",host="%s"}\n' "$host"
-  printf '   Loki:       {job="systemd-journal",host="%s"}\n' "$host"
+  files=$(find "$ETC_DIR" -maxdepth 1 -name '*.alloy' 2>/dev/null | wc -l)
+  ui_row Config none "$ETC_DIR ($files arquivo(s) .alloy)"
+  if credential_present; then
+    ui_row Credencial ok "$SECRET ($(stat -c '%U:%G %a' "$SECRET"))"
+  else
+    ui_row Credencial warn 'ausente'
+  fi
+
+  if alloy_installed; then
+    ui_section 'AVISOS E ERROS (24H)'
+    issues=$(journalctl -u alloy --since=-24h --no-pager -o cat 2>/dev/null | grep -E 'level=(warn|error)' || true)
+    if [[ -z $issues ]]; then
+      ui_row Journal ok 'nenhum aviso ou erro'
+    else
+      count=$(grep -c . <<<"$issues")
+      ui_row Journal warn "$count linha(s); as mais recentes:"
+      tail -n 6 <<<"$issues" | cut -c1-$((UI_WIDTH + 10)) | sed 's/^/    /'
+    fi
+  fi
+
+  ui_section CONECTIVIDADE
+  check_endpoint Auth auth.assessoriatech.com
+  check_endpoint Mon mon.assessoriatech.com
+
+  ui_section 'GRAFANA - EXPLORE (ULTIMA 1H)'
+  print_query Metricas "$GRAFANA_DS_METRICS" "up{job=\"integrations/unix\",host=\"$host\"}"
+  print_query Logs "$GRAFANA_DS_LOGS" "{job=\"systemd-journal\",host=\"$host\"}"
   if docker_module; then
-    printf '   Prometheus: up{job="integrations/docker",host="%s"}\n' "$host"
-    printf '   Loki:       {job="docker",host="%s"}\n' "$host"
+    print_query Docker "$GRAFANA_DS_METRICS" "up{job=\"integrations/docker\",host=\"$host\"}"
+    print_query 'Logs Docker' "$GRAFANA_DS_LOGS" "{job=\"docker\",host=\"$host\"}"
   fi
-  printf '\n   Para validar a credencial de ponta a ponta, use "Testar credencial".\n'
+  printf '\n  %sValidar a credencial de ponta a ponta: opcao [4].%s\n' "$C_DIM" "$C_RESET"
 }
