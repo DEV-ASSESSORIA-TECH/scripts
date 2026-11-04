@@ -103,7 +103,7 @@ switch ($Modules) {
 
 $Source = Join-Path $PSScriptRoot 'config.alloy'
 if (-not (Test-Path -LiteralPath $Secret -PathType Leaf) -or (Get-Item -LiteralPath $Secret).Length -eq 0) {
-    throw 'Credencial ausente. Execute setup-credentials.ps1 primeiro.'
+    throw 'Credencial ausente. Execute alloy.ps1 (ou setup-credentials.ps1) primeiro.'
 }
 if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
     throw 'config.alloy nao encontrado ao lado de install.ps1.'
@@ -125,14 +125,18 @@ try {
         if (Test-Path -LiteralPath $localModule -PathType Leaf) {
             Copy-Item -LiteralPath $localModule -Destination $stageModule
         } else {
-            Log 'Baixando hyperv.alloy pela API do GitHub...'
-            $api = 'https://api.github.com/repos/DEV-ASSESSORIA-TECH/scripts/contents/monitoring/alloy/windows/hyperv.alloy?ref=main'
-            $payload = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'AssessoriaTech-Alloy-Installer/1.0' }
-            if (-not $payload.content) { throw 'Resposta da API GitHub sem conteudo para hyperv.alloy.' }
-            $moduleText = [Text.Encoding]::UTF8.GetString(
-                [Convert]::FromBase64String(($payload.content -replace '\s', ''))
-            )
-            [IO.File]::WriteAllText($stageModule, $moduleText, [Text.UTF8Encoding]::new($false))
+            # Mesma origem e referencia do alloy.ps1 (ALLOY_REF; padrao: main).
+            $ref = if ($env:ALLOY_REF) { $env:ALLOY_REF } else { 'main' }
+            if ($ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or $ref.Contains('..')) {
+                throw "ALLOY_REF invalido: $ref"
+            }
+            Log "Baixando hyperv.alloy (ref $ref)..."
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            $raw = "https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ref/monitoring/alloy/windows/hyperv.alloy"
+            Invoke-WebRequest -Uri $raw -OutFile $stageModule -UseBasicParsing -Headers @{ 'User-Agent' = 'AssessoriaTech-Alloy-Installer/1.0' }
+            if (-not (Test-Path -LiteralPath $stageModule) -or (Get-Item -LiteralPath $stageModule).Length -eq 0) {
+                throw 'Download de hyperv.alloy vazio.'
+            }
         }
     }
     if (Test-Path -LiteralPath $ConfigDir -PathType Container) {

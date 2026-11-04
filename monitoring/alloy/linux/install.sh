@@ -33,7 +33,7 @@ done
 case "$selection" in auto|docker|none) ;; *) fail 'Use --modules docker ou --modules none.' ;; esac
 
 [[ $EUID -eq 0 ]] || fail 'Execute com sudo.'
-[[ -s /etc/alloy/oauth-client-secret ]] || fail 'Execute setup-credentials.py primeiro.'
+[[ -s /etc/alloy/oauth-client-secret ]] || fail 'Credencial ausente: execute alloy.sh (ou setup-credentials.py) primeiro.'
 [[ ! -L /etc/alloy ]] || fail '/etc/alloy nao pode ser link simbolico.'
 command -v apt-get >/dev/null || fail 'APT obrigatorio (Debian/Ubuntu).'
 command -v curl >/dev/null || fail 'curl ausente; instale antes de executar.'
@@ -77,10 +77,12 @@ if [[ $use_docker == true ]]; then
   if [[ -s "$script_dir/docker.alloy" ]]; then
     cp -- "$script_dir/docker.alloy" "$stage/docker.alloy"
   else
-    log 'Baixando docker.alloy da API GitHub...'
-    curl -fsSL -H 'Accept: application/vnd.github+json' \
-      'https://api.github.com/repos/DEV-ASSESSORIA-TECH/scripts/contents/monitoring/alloy/linux/docker.alloy?ref=main' |
-      python3 -c 'import base64,json,sys; sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["content"]))' > "$stage/docker.alloy"
+    # Mesma origem e referencia do alloy.sh (ALLOY_REF; padrao: main).
+    ref=${ALLOY_REF:-main}
+    [[ $ref =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && $ref != *..* ]] || fail "ALLOY_REF invalido: $ref"
+    log "Baixando docker.alloy (ref $ref)..."
+    curl -fsSL --proto '=https' -o "$stage/docker.alloy" \
+      "https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ref/monitoring/alloy/linux/docker.alloy"
     [[ -s "$stage/docker.alloy" ]] || fail 'Download docker.alloy vazio.'
   fi
 fi
@@ -253,7 +255,7 @@ rollback() {
   if [[ $old_active == active ]]; then
     systemctl restart alloy || log 'CRITICO: falha ao reiniciar configuracao restaurada.'
     restored=false
-    for attempt in {1..12}; do
+    for _ in {1..12}; do
       if systemctl is-active --quiet alloy &&
          curl -fsS --max-time 2 http://127.0.0.1:12345/-/ready >/dev/null 2>&1; then
         restored=true
@@ -305,7 +307,7 @@ if ! systemctl enable alloy || ! systemctl restart alloy; then
   fail 'Falha na inicializacao; configuracao anterior restaurada.'
 fi
 ready=false
-for attempt in {1..12}; do
+for _ in {1..12}; do
   if systemctl is-active --quiet alloy &&
      curl -fsS --max-time 2 http://127.0.0.1:12345/-/ready >/dev/null 2>&1; then
     ready=true

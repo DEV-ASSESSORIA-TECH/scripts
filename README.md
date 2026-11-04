@@ -1,104 +1,41 @@
 # scripts
 
-Repositório de scripts operacionais da Assessoria Tech: instalação,
-configuração e manutenção de serviços nos servidores dos clientes.
+Scripts operacionais da Assessoria Tech: instalação, configuração e
+manutenção de serviços nos servidores atendidos.
+
+Cada área fica em sua própria pasta, com um README próprio explicando uso e
+requisitos. A documentação dos processos fica na base de conhecimento interna.
 
 ## Sumário
 
-| Área | Caminho | O que faz |
-|------|---------|-----------|
-| Monitoramento | [`monitoring/alloy/linux`](monitoring/alloy/linux) | Instala o Grafana Alloy em Linux (Debian/Ubuntu) |
-| Monitoramento | [`monitoring/alloy/windows`](monitoring/alloy/windows) | Instala o Grafana Alloy em Windows |
+| Área | Pasta | Descrição |
+|------|-------|-----------|
+| Monitoramento | [`monitoring/alloy`](monitoring/alloy) | Agente Grafana Alloy (Linux e Windows) |
 
-## Estrutura
+## Organização
 
 ```
 scripts/
-│
-├── monitoring/
-│   └── alloy/
+├── <area>/            # ex.: monitoring, backup, network
+│   └── <ferramenta>/  # um conjunto de scripts por ferramenta
 │       ├── linux/
-│       │   ├── install.sh              # instala o Alloy (apt) e aplica o config.alloy
-│       │   ├── setup-credentials.py    # valida e grava a credencial OAuth2
-│       │   ├── config.alloy            # métricas do host + logs do journald
-│       │   └── docker.alloy            # métricas e logs dos containers Docker
-│       │
 │       └── windows/
-│           ├── install.ps1             # instala o Alloy e aplica o config.alloy
-│           ├── setup-credentials.ps1   # valida e grava a credencial OAuth2
-│           └── config.alloy            # métricas do host + Event Log
-│
+├── LICENSE
 └── README.md
 ```
 
-## Monitoramento (Grafana Alloy)
+## Convenções
 
-O [Grafana Alloy](https://grafana.com/docs/alloy/latest/) roda em cada
-servidor, coleta métricas e logs e envia para a central:
+- Um ponto de entrada por ferramenta e sistema operacional; os demais
+  arquivos são carregados ou baixados por ele.
+- Scripts idempotentes: executar de novo não deve causar alterações sem
+  necessidade.
+- Nenhuma credencial no repositório. Segredos são informados na execução e
+  gravados apenas no servidor de destino.
+- Arquivos `.ps1` em ASCII, para compatibilidade com o Windows PowerShell 5.1.
 
-- **Métricas** → Prometheus (`https://mon.assessoriatech.com/api/v1/write`)
-- **Logs** → Loki (`https://mon.assessoriatech.com/loki/api/v1/push`)
-- **Autenticação** → OAuth2 (`https://auth.assessoriatech.com`) com uma conta
-  de serviço por servidor, no formato `alloy-<hostname>`.
+## Licença
 
-O fluxo é sempre em duas etapas:
-
-1. **`setup-credentials`** – pede usuário e senha da conta de serviço, testa
-   o login OAuth2 e o envio de um log de teste ao Loki. Só grava a credencial
-   em disco se os dois testes passarem. Nunca sobrescreve uma credencial
-   existente.
-2. **`install`** – instala o Alloy, copia o `config.alloy` e inicia o serviço.
-   Faz backup da configuração anterior (`config.alloy.bak-<data>`).
-
-### Linux
-
-```bash
-sudo python3 monitoring/alloy/linux/setup-credentials.py
-```
-
-```bash
-sudo bash monitoring/alloy/linux/install.sh
-```
-
-Credencial: `/etc/alloy/oauth-client-secret` · Config: `/etc/alloy/config.alloy`
-
-#### Docker (opcional)
-
-O `docker.alloy` contém apenas a coleta de Docker (métricas via cAdvisor e
-logs dos containers) e reutiliza os destinos definidos no `config.alloy`.
-Para ativar num host que já tem o Alloy instalado:
-
-```bash
-sudo install -o root -g alloy -m 0640 monitoring/alloy/linux/docker.alloy /etc/alloy/docker.alloy
-```
-
-```bash
-sudo usermod -aG docker alloy
-```
-
-```bash
-sudo sed -i 's#^CONFIG_FILE=.*#CONFIG_FILE="/etc/alloy"#' /etc/default/alloy
-```
-
-```bash
-sudo alloy validate /etc/alloy && sudo systemctl restart alloy
-```
-
-Com `CONFIG_FILE` apontando para o diretório, o Alloy carrega todos os
-arquivos `*.alloy` de `/etc/alloy`.
-
-### Windows
-
-Em um PowerShell **como Administrador**:
-
-```powershell
-.\monitoring\alloy\windows\setup-credentials.ps1
-.\monitoring\alloy\windows\install.ps1
-```
-
-Credencial: `C:\ProgramData\GrafanaLabs\Alloy\oauth-client-secret` (acesso só
-para SYSTEM e Administradores) · Config:
-`C:\Program Files\GrafanaLabs\Alloy\config.alloy`
-
-Coleta métricas do host (`windows_exporter`) e os logs dos canais
-**Application** e **System** do Event Viewer.
+Uso permitido para estudo e desenvolvimento próprio. Links, IDs e
+credenciais da infraestrutura da Assessoria Tech **não** podem ser usados por
+terceiros sem autorização. Veja [LICENSE](LICENSE).

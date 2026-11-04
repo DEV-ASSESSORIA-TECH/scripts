@@ -1,0 +1,80 @@
+TERMOS DE USO E LICENÇA - REPOSITÓRIO PÚBLICO
+
+Copyright (c) 2026 ASSESSORIA TECNOLOGIA E GESTÃO
+
+1. PERMISSÃO DE USO DO CÓDIGO
+   É concedida permissão, gratuita, a qualquer pessoa que obtenha uma cópia
+   deste software e dos arquivos de documentação associados (o "Software"),
+   para visualizar, copiar, estudar e modificar o código-fonte, para fins de
+   estudo ou de desenvolvimento próprio, observadas as condições abaixo.
+
+2. RESTRIÇÃO DE USO DA INFRAESTRUTURA DO AUTOR
+   2.1. Fica EXPRESSAMENTE PROIBIDO a terceiros, sem autorização prévia e
+        por escrito do autor, utilizar, executar contra ou comunicar-se com
+        quaisquer recursos de propriedade do autor referenciados, de forma
+        explícita ou implícita, no Software, incluindo, sem limitação:
+        domínios e endereços (URLs), endpoints de API, chaves de API, tokens,
+        identificadores de clientes OAuth/OIDC, contas de serviço e demais
+        IDs ou credenciais internas.
+   2.2. Quem utilizar, executar ou distribuir o Software, no todo ou em
+        parte, DEVE OBRIGATORIAMENTE substituir todos esses links, IDs e
+        credenciais por infraestrutura e credenciais próprias.
+   2.3. A permissão concedida na cláusula 1 não inclui qualquer direito de
+        acesso aos sistemas, serviços ou dados do autor.
+
+3. CRÉDITOS
+   O aviso de direitos autorais acima e estes termos devem ser mantidos em
+   todas as cópias ou partes substanciais do Software.
+
+4. AUSÊNCIA DE GARANTIAS E LIMITAÇÃO DE RESPONSABILIDADE
+   O Software é fornecido "no estado em que se encontra", sem garantia de
+   qualquer tipo, expressa ou implícita, incluindo, sem limitação, garantias
+   de comercialização, adequação a um propósito específico e não violação.
+   Em nenhuma hipótese o autor será responsável por qualquer reclamação,
+   dano ou outra responsabilidade decorrente do uso do Software ou de
+   qualquer outra relação com ele.
+
+5. IDIOMA
+   Uma tradução para o inglês segue abaixo apenas para conveniência. Em caso
+   de divergência, prevalece a versão em português.
+
+-------------------------------------------------------------------------------
+
+TERMS OF USE AND LICENSE - PUBLIC REPOSITORY (English translation)
+
+Copyright (c) 2026 ASSESSORIA TECNOLOGIA E GESTÃO
+
+1. PERMISSION TO USE THE CODE
+   Permission is hereby granted, free of charge, to any person obtaining a
+   copy of this software and associated documentation files (the
+   "Software"), to view, copy, study and modify the source code for study or
+   in-house development purposes, subject to the conditions below.
+
+2. RESTRICTION ON THE USE OF THE AUTHOR'S INFRASTRUCTURE
+   2.1. Third parties are EXPRESSLY PROHIBITED, without the author's prior
+        written authorization, from using, running against or communicating
+        with any resources owned by the author that are explicitly or
+        implicitly referenced in the Software, including, without
+        limitation: domains and addresses (URLs), API endpoints, API keys,
+        tokens, OAuth/OIDC client identifiers, service accounts and any
+        other internal IDs or credentials.
+   2.2. Anyone who uses, runs or distributes the Software, in whole or in
+        part, MUST replace all such links, IDs and credentials with their
+        own infrastructure and credentials.
+   2.3. The permission granted in section 1 does not include any right to
+        access the author's systems, services or data.
+
+3. ATTRIBUTION
+   The above copyright notice and these terms shall be included in all
+   copies or substantial portions of the Software.
+
+4. NO WARRANTY AND LIMITATION OF LIABILITY
+   The Software is provided "as is", without warranty of any kind, express
+   or implied, including but not limited to the warranties of
+   merchantability, fitness for a particular purpose and non-infringement.
+   In no event shall the author be liable for any claim, damages or other
+   liability arising from, out of or in connection with the Software.
+
+5. LANGUAGE
+   This English translation is provided for convenience only. In case of
+   any discrepancy, the Portuguese version prevails.

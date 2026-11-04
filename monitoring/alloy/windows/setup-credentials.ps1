@@ -1,9 +1,11 @@
 #Requires -RunAsAdministrator
 #Requires -Version 5.1
 [CmdletBinding()]
-param([switch]$Rotate)
+param([switch]$Rotate, [switch]$Check)
 # Valida a conta de servico do Alloy (OAuth2 + ingestao no Loki) e, somente
 # se ambos os testes passarem, grava a credencial com ACL restrita.
+# -Rotate: substitui a credencial existente (apos os mesmos testes).
+# -Check:  testa a credencial ja gravada, sem alterar nada.
 # Equivalente Windows do linux/setup-credentials.py.
 
 $ErrorActionPreference = 'Stop'
@@ -36,6 +38,80 @@ function Invoke-Post($Url, $Content, $Label) {
     }
 }
 
+# Teste 1: token OAuth2. Teste 2: uma linha de log no Loki. Lanca erro em falha.
+function Test-AlloyCredential([string]$Credential, [string]$Username) {
+    try {
+        # Teste 1 - OAuth2
+        $form = New-Object 'System.Collections.Generic.List[System.Collections.Generic.KeyValuePair[string,string]]'
+        $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'grant_type', 'client_credentials'))
+        $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'client_id', $ClientId))
+        $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'client_secret', $credential))
+        $form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'scope', 'profile'))
+        $result = Invoke-Post $TokenUrl ([System.Net.Http.FormUrlEncodedContent]::new($form)) 'Teste 1 - OAuth2'
+        if ($result.Status -ne 200) {
+            Write-Host "Teste 1 - OAuth2: HTTP $($result.Status) | REPROVADO - autenticacao negada"
+            # Exibir somente os campos OAuth2 de erro, nunca o corpo HTTP completo.
+            # Sanitizar valores sensiveis, caracteres de controle e mensagens longas.
+            try {
+                $oauthError = ConvertFrom-Json -InputObject $result.Body -ErrorAction Stop
+                $errorCode = [string]$oauthError.error
+                if ($errorCode -match '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$') {
+                    Write-Host "OAuth2 - codigo: $errorCode"
+                }
+                $errorDescription = [string]$oauthError.error_description
+                if (-not $errorDescription -and $oauthError.detail -is [string]) {
+                    $errorDescription = [string]$oauthError.detail
+                }
+                if (-not [string]::IsNullOrWhiteSpace($errorDescription)) {
+                    $errorDescription = ($errorDescription -replace '[\x00-\x1f\x7f]+', ' ').Trim()
+                    $errorDescription = $errorDescription.Replace($credential, '[credencial omitida]')
+                    $errorDescription = $errorDescription -replace '(?i)\b(Bearer|Basic)\s+[a-zA-Z0-9+/_=-]{8,}', '$1 [omitido]'
+                    $errorDescription = $errorDescription -replace '(?i)\b(client_secret|access_token|refresh_token|id_token|password|senha)\s*[:=]\s*[^\s,;]+', '$1=[omitido]'
+                    if ($errorDescription.Length -gt 200) {
+                        $errorDescription = $errorDescription.Substring(0, 200) + '...'
+                    }
+                    Write-Host "OAuth2 - descricao: $errorDescription"
+                }
+            } catch {
+                Write-Host 'OAuth2 - detalhes indisponiveis (resposta nao e JSON valido).'
+            }
+            throw 'Nenhum arquivo local foi alterado.'
+        }
+        try {
+            $accessToken = ($result.Body | ConvertFrom-Json).access_token
+        } catch {
+            $accessToken = $null
+        }
+        if (-not ($accessToken -is [string]) -or [string]::IsNullOrEmpty($accessToken)) {
+            Write-Host 'Teste 1 - OAuth2: HTTP 200 | REPROVADO - token ausente'
+            throw 'Nenhum arquivo local foi alterado.'
+        }
+        Write-Host 'Teste 1 - OAuth2: HTTP 200 | APROVADO - token emitido'
+
+        # Teste 2 - Loki
+        $nowNs = ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() * 1000000).ToString()
+        $probe = @{
+            streams = @(@{
+                stream = @{ job = 'alloy-auth-probe'; host = $username.Substring(6) }
+                values = @(, @($nowNs, 'Teste de autorizacao Alloy'))
+            })
+        } | ConvertTo-Json -Depth 6 -Compress
+        $content = [System.Net.Http.StringContent]::new($probe, [Text.Encoding]::UTF8, 'application/json')
+        $client.DefaultRequestHeaders.Authorization =
+            [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $accessToken)
+        $result = Invoke-Post $LokiUrl $content 'Teste 2 - Loki'
+        if ($result.Status -ne 204) {
+            Write-Host "Teste 2 - Loki: HTTP $($result.Status) | REPROVADO - ingestao nao confirmada"
+            throw 'Nenhum arquivo local foi alterado.'
+        }
+        Write-Host 'Teste 2 - Loki: HTTP 204 | APROVADO - ingestao autorizada'
+    } finally {
+        $client.Dispose()
+        $handler.Dispose()
+        $accessToken = $null
+    }
+}
+
 if (Test-Path -LiteralPath $Base -PathType Leaf) {
     throw "Diretorio $Base invalido."
 }
@@ -50,6 +126,27 @@ foreach ($pathToCheck in @($Base, $Secret)) {
 $exists = Test-Path -LiteralPath $Secret
 if ($exists -and -not (Test-Path -LiteralPath $Secret -PathType Leaf)) {
     throw 'Caminho da credencial nao e arquivo regular.'
+}
+if ($Check -and $Rotate) { throw 'Use -Check ou -Rotate, nao ambos.' }
+if ($Check) {
+    if (-not $exists) { throw 'Credencial inexistente; nada a testar.' }
+    $stored = [IO.File]::ReadAllText($Secret, [Text.Encoding]::ASCII).Trim()
+    try {
+        $storedUser = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($stored)).Split(':')[0]
+    } catch {
+        throw 'Credencial gravada nao e Base64 valido.'
+    }
+    if ($storedUser -cnotmatch '^alloy-[a-z0-9][a-z0-9-]*$') {
+        throw 'Credencial gravada em formato inesperado (usuario:senha).'
+    }
+    Write-Host "Testando a credencial gravada ($storedUser)..."
+    try {
+        Test-AlloyCredential $stored $storedUser
+    } finally {
+        $stored = $null
+    }
+    Write-Host 'Credencial valida. Nenhum arquivo foi alterado.'
+    return
 }
 if ($exists -and -not $Rotate) { throw 'Credencial ja existe. Use -Rotate para substituir.' }
 if (-not $exists -and $Rotate) { throw 'Credencial inexistente. Execute sem -Rotate.' }
@@ -98,76 +195,7 @@ if ($username -cnotmatch '^alloy-[a-z0-9][a-z0-9-]*$') {
     throw 'Conta invalida. Formato: alloy-<hostname>.'
 }
 
-try {
-# Teste 1 - OAuth2
-$form = New-Object 'System.Collections.Generic.List[System.Collections.Generic.KeyValuePair[string,string]]'
-$form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'grant_type', 'client_credentials'))
-$form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'client_id', $ClientId))
-$form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'client_secret', $credential))
-$form.Add((New-Object 'System.Collections.Generic.KeyValuePair[string,string]' 'scope', 'profile'))
-$result = Invoke-Post $TokenUrl ([System.Net.Http.FormUrlEncodedContent]::new($form)) 'Teste 1 - OAuth2'
-if ($result.Status -ne 200) {
-    Write-Host "Teste 1 - OAuth2: HTTP $($result.Status) | REPROVADO - autenticacao negada"
-    # Exibir somente os campos OAuth2 de erro, nunca o corpo HTTP completo.
-    # Sanitizar valores sensiveis, caracteres de controle e mensagens longas.
-    try {
-        $oauthError = ConvertFrom-Json -InputObject $result.Body -ErrorAction Stop
-        $errorCode = [string]$oauthError.error
-        if ($errorCode -match '^[a-zA-Z][a-zA-Z0-9_-]{0,63}$') {
-            Write-Host "OAuth2 - codigo: $errorCode"
-        }
-        $errorDescription = [string]$oauthError.error_description
-        if (-not $errorDescription -and $oauthError.detail -is [string]) {
-            $errorDescription = [string]$oauthError.detail
-        }
-        if (-not [string]::IsNullOrWhiteSpace($errorDescription)) {
-            $errorDescription = ($errorDescription -replace '[\x00-\x1f\x7f]+', ' ').Trim()
-            $errorDescription = $errorDescription.Replace($credential, '[credencial omitida]')
-            $errorDescription = $errorDescription -replace '(?i)\b(Bearer|Basic)\s+[a-zA-Z0-9+/_=-]{8,}', '$1 [omitido]'
-            $errorDescription = $errorDescription -replace '(?i)\b(client_secret|access_token|refresh_token|id_token|password|senha)\s*[:=]\s*[^\s,;]+', '$1=[omitido]'
-            if ($errorDescription.Length -gt 200) {
-                $errorDescription = $errorDescription.Substring(0, 200) + '...'
-            }
-            Write-Host "OAuth2 - descricao: $errorDescription"
-        }
-    } catch {
-        Write-Host 'OAuth2 - detalhes indisponiveis (resposta nao e JSON valido).'
-    }
-    throw 'Nenhum arquivo local foi alterado.'
-}
-try {
-    $accessToken = ($result.Body | ConvertFrom-Json).access_token
-} catch {
-    $accessToken = $null
-}
-if (-not ($accessToken -is [string]) -or [string]::IsNullOrEmpty($accessToken)) {
-    Write-Host 'Teste 1 - OAuth2: HTTP 200 | REPROVADO - token ausente'
-    throw 'Nenhum arquivo local foi alterado.'
-}
-Write-Host 'Teste 1 - OAuth2: HTTP 200 | APROVADO - token emitido'
-
-# Teste 2 - Loki
-$nowNs = ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() * 1000000).ToString()
-$probe = @{
-    streams = @(@{
-        stream = @{ job = 'alloy-auth-probe'; host = $username.Substring(6) }
-        values = @(, @($nowNs, 'Teste de autorizacao Alloy'))
-    })
-} | ConvertTo-Json -Depth 6 -Compress
-$content = [System.Net.Http.StringContent]::new($probe, [Text.Encoding]::UTF8, 'application/json')
-$client.DefaultRequestHeaders.Authorization =
-    [System.Net.Http.Headers.AuthenticationHeaderValue]::new('Bearer', $accessToken)
-$result = Invoke-Post $LokiUrl $content 'Teste 2 - Loki'
-if ($result.Status -ne 204) {
-    Write-Host "Teste 2 - Loki: HTTP $($result.Status) | REPROVADO - ingestao nao confirmada"
-    throw 'Nenhum arquivo local foi alterado.'
-}
-Write-Host 'Teste 2 - Loki: HTTP 204 | APROVADO - ingestao autorizada'
-} finally {
-    $client.Dispose()
-    $handler.Dispose()
-    $accessToken = $null
-}
+Test-AlloyCredential $credential $username
 
 # Apenas a partir daqui persistimos no disco. Nao exige Alloy instalado.
 # Novo diretorio e credencial possuem ACL somente para SYSTEM/Administradores.
