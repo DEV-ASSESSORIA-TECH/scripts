@@ -15,6 +15,11 @@ $Registry    = 'HKLM:\SOFTWARE\GrafanaLabs\Alloy'
 $ServiceName = 'Alloy'
 $ReadyUrl    = 'http://127.0.0.1:12345/-/ready'
 $HyperVFile  = Join-Path $ConfigDir 'hyperv.alloy'
+# Inventario de VMs do modulo Hyper-V (ver install.ps1).
+$LogDir            = Join-Path $Base 'logs'
+$InventoryOutput   = Join-Path $Base 'textfile\hypervisor.prom'
+$InventoryTaskPath = '\GrafanaLabs\'
+$InventoryTaskName = 'Alloy Hypervisor Inventory'
 $UninstallKeys = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'

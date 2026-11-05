@@ -91,3 +91,36 @@ operação precisa. Executado a partir de um clone, usa os arquivos locais.
 | `uninstall.*` | desinstalação e limpeza completa |
 | `config.alloy` | configuração base do sistema |
 | `docker.alloy` / `hyperv.alloy` | módulos opcionais |
+| `hypervisor-inventory.ps1` | inventário de VMs do módulo Hyper-V (tarefa agendada) |
+
+## Módulo Hyper-V
+
+Detectado automaticamente na instalação (serviço `vmms` ativo e `Get-VM`
+acessível). Em servidores que já têm o módulo, **[1] Reaplicar configuração**
+atualiza tudo, inclusive o inventário de VMs.
+
+| Parte | Onde | O que faz |
+|-------|------|-----------|
+| Métricas Hyper-V | `config\hyperv.alloy`, job `integrations/hyperv` | contadores do hypervisor: CPU, memória, discos e rede virtuais |
+| Inventário de VMs | `scripts\hypervisor-inventory.ps1`, job `integrations/hypervisor` | estado de cada VM (inclusive desligadas), sistema convidado, vCPU, memória, checkpoints, heartbeat, discos e placas de rede |
+| Logs | `hyperv.alloy`, job `hyperv-eventlog` | canais VMMS-Admin e Worker-Admin |
+
+O inventário roda a cada minuto, como SYSTEM, pela tarefa agendada
+`\GrafanaLabs\Alloy Hypervisor Inventory`, e grava `textfile\hypervisor.prom`,
+lido pelo coletor `textfile` do Alloy (requer Alloy v1.11+). As métricas usam
+nomes neutros (`hypervisor_*`, com `platform="hyperv"`) para que outras
+plataformas possam publicar o mesmo formato.
+
+Diretórios em `C:\ProgramData\GrafanaLabs\Alloy` (acesso só de SYSTEM e
+Administradores):
+
+| Diretório | Conteúdo | Retenção |
+|-----------|----------|----------|
+| `scripts\` | script do inventário | substituído a cada reaplicação |
+| `textfile\` | `hypervisor.prom` | sobrescrito a cada execução |
+| `data\hypervisor\` | `guests.json`: último hostname/SO conhecido de cada VM (VM desligada não informa) | VMs removidas saem na execução seguinte |
+| `logs\` | `hypervisor-inventory-AAAAMMDD.log`, uma linha por execução | 14 dias |
+
+Desativar o módulo remove a tarefa, o script, a saída, o cache e os logs do
+inventário. Desinstalar o Alloy remove a tarefa; a limpeza completa remove
+também os arquivos.

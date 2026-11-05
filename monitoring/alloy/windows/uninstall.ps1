@@ -36,11 +36,13 @@ $account = Get-CredentialUser
 $installed = Test-AlloyInstalled
 $service = Get-AlloyService
 $uninstaller = Find-AlloyUninstaller
+$inventoryTask = Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -ErrorAction SilentlyContinue
 
 if ($Purge) {
     $targets = @()
     if ($installed -or $uninstaller) { $targets += 'programa Grafana Alloy' }
     elseif ($service) { $targets += 'servico Alloy' }
+    if ($inventoryTask) { $targets += "tarefa agendada $InventoryTaskPath$InventoryTaskName" }
     foreach ($path in @($Base, $InstallDir)) {
         if (Test-Path -LiteralPath $path) { $targets += $path }
     }
@@ -68,6 +70,13 @@ if ($Purge) {
             return
         }
     }
+}
+
+# Sem o Alloy, a tarefa do inventario nao tem quem leia a saida. Os arquivos
+# ficam (exceto no -Purge); a reinstalacao registra a tarefa de novo.
+if ($inventoryTask) {
+    Write-Log 'Removendo a tarefa agendada do inventario de VMs...'
+    Unregister-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -Confirm:$false
 }
 
 if ($service) {

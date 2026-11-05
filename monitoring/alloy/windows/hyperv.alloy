@@ -1,6 +1,7 @@
 // Modulo opcional Hyper-V para hosts Windows.
 // Requer a funcao Hyper-V ativa (VMMS + root/virtualization/v2).
-// Inclui somente metricas do Hyper-V, sem duplicar a base Windows.
+// Inclui somente metricas do Hyper-V e o inventario de VMs, sem duplicar a
+// base Windows. Requer Alloy v1.11+ (bloco textfile).
 // O config.alloy principal fornece prometheus.remote_write.central,
 // loki.process.eventlog e loki.write.central.
 
@@ -28,6 +29,42 @@ discovery.relabel "hyperv" {
 prometheus.scrape "hyperv" {
   targets         = discovery.relabel.hyperv.output
   scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+// Inventario das VMs (estado, convidado, discos e rede), gerado a cada minuto
+// pela tarefa agendada "\GrafanaLabs\Alloy Hypervisor Inventory"
+// (scripts\hypervisor-inventory.ps1) em textfile\hypervisor.prom.
+// Metricas neutras (hypervisor_*) em job proprio, para que outras plataformas
+// de virtualizacao possam publicar o mesmo formato no futuro.
+prometheus.exporter.windows "hypervisor" {
+  enabled_collectors = ["textfile"]
+
+  textfile {
+    directories = ["C:\\ProgramData\\GrafanaLabs\\Alloy\\textfile"]
+  }
+}
+
+discovery.relabel "hypervisor" {
+  targets = prometheus.exporter.windows.hypervisor.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "integrations/hypervisor"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = string.to_lower(constants.hostname)
+  }
+  rule {
+    target_label = "host"
+    replacement  = string.to_lower(constants.hostname)
+  }
+}
+
+prometheus.scrape "hypervisor" {
+  targets         = discovery.relabel.hypervisor.output
+  scrape_interval = "60s"
   forward_to      = [prometheus.remote_write.central.receiver]
 }
 

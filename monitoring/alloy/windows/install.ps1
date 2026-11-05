@@ -18,6 +18,16 @@ $Exe = Join-Path $env:ProgramFiles 'GrafanaLabs\Alloy\alloy-windows-amd64.exe'
 $Registry = 'HKLM:\SOFTWARE\GrafanaLabs\Alloy'
 $Service = 'Alloy'
 $InstallerUrl = 'https://github.com/grafana/alloy/releases/latest/download/alloy-installer-windows-amd64.exe.zip'
+# Inventario de VMs (modulo Hyper-V): script, saida do textfile, cache e logs.
+$ScriptsDir = Join-Path $Base 'scripts'
+$TextfileDir = Join-Path $Base 'textfile'
+$LogDir = Join-Path $Base 'logs'
+$InventoryName = 'hypervisor-inventory.ps1'
+$InventoryScript = Join-Path $ScriptsDir $InventoryName
+$InventoryState = Join-Path $DataDir 'hypervisor'
+$InventoryOutput = Join-Path $TextfileDir 'hypervisor.prom'
+$InventoryTaskPath = '\GrafanaLabs\'
+$InventoryTaskName = 'Alloy Hypervisor Inventory'
 
 function Log([string]$Text) { Write-Host "[Alloy] $Text" }
 function Ensure-Directory([string]$Path) {
@@ -61,6 +71,98 @@ function Set-PrivateDirectoryAcl([string]$Path) {
     Set-Acl -LiteralPath $Path -AclObject $acl
 }
 
+# Arquivo do modulo: do clone local, ou baixado do mesmo ref do alloy.ps1
+# (ALLOY_REF; padrao: main).
+function Copy-ModuleFile([string]$Name, [string]$Destination) {
+    $local = Join-Path $PSScriptRoot $Name
+    if (Test-Path -LiteralPath $local -PathType Leaf) {
+        Copy-Item -LiteralPath $local -Destination $Destination
+        return
+    }
+    $ref = if ($env:ALLOY_REF) { $env:ALLOY_REF } else { 'main' }
+    if ($ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or $ref.Contains('..')) {
+        throw "ALLOY_REF invalido: $ref"
+    }
+    Log "Baixando $Name (ref $ref)..."
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    $raw = "https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ref/monitoring/alloy/windows/$Name"
+    Invoke-WebRequest -Uri $raw -OutFile $Destination -UseBasicParsing -Headers @{ 'User-Agent' = 'AssessoriaTech-Alloy-Installer/1.0' }
+    if (-not (Test-Path -LiteralPath $Destination) -or (Get-Item -LiteralPath $Destination).Length -eq 0) {
+        throw "Download de $Name vazio."
+    }
+}
+
+# O script roda como SYSTEM: so e instalado se o parser do PowerShell aceitar.
+function Assert-ScriptSyntax([string]$Path) {
+    $tokens = $null
+    $errors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    if ($errors -and $errors.Count -gt 0) {
+        $first = $errors[0]
+        throw "$(Split-Path -Leaf $Path) com erro de sintaxe (linha $($first.Extent.StartLineNumber)): $($first.Message)"
+    }
+}
+
+# Inventario de VMs: script em scripts\, tarefa agendada a cada minuto como
+# SYSTEM e primeira execucao conferida. Desabilitado: remove tarefa, script,
+# saida, cache e logs do inventario.
+function Sync-HypervisorInventory([bool]$Enabled, [string]$StagedScript) {
+    $task = Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -ErrorAction SilentlyContinue
+    if (-not $Enabled) {
+        $hadFiles = (Test-Path -LiteralPath $InventoryScript) -or (Test-Path -LiteralPath $InventoryOutput)
+        if ($task) { Unregister-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -Confirm:$false }
+        foreach ($path in @($InventoryScript, $InventoryOutput, ($InventoryOutput + '.tmp'))) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path -LiteralPath $InventoryState) { Remove-Item -LiteralPath $InventoryState -Recurse -Force -ErrorAction SilentlyContinue }
+        if (Test-Path -LiteralPath $LogDir) {
+            Get-ChildItem -LiteralPath $LogDir -Filter 'hypervisor-inventory-*.log' -File -ErrorAction SilentlyContinue |
+                Remove-Item -Force -ErrorAction SilentlyContinue
+        }
+        if ($task -or $hadFiles) { Log 'Inventario de VMs removido (tarefa, script, saida e logs).' }
+        return
+    }
+
+    if (-not (Same-File $StagedScript $InventoryScript)) {
+        Copy-Item -LiteralPath $StagedScript -Destination $InventoryScript -Force
+        Log "Inventario de VMs: script instalado em $InventoryScript."
+    }
+
+    # Conta SYSTEM pelo SID: o nome muda com o idioma do Windows.
+    $system = ([System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')).Translate([System.Security.Principal.NTAccount]).Value
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $InventoryScript)
+    $everyMinute = New-ScheduledTaskTrigger -Once -At (Get-Date).Date -RepetitionInterval (New-TimeSpan -Minutes 1)
+    $atStartup = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId $system -LogonType ServiceAccount -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 5) `
+        -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    Register-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -Action $action `
+        -Trigger @($everyMinute, $atStartup) -Principal $principal -Settings $settings -Force `
+        -Description 'Inventario de VMs para o Grafana Alloy (textfile\hypervisor.prom). Gerenciado pelo install.ps1.' | Out-Null
+
+    # Primeira execucao agora, para nao esperar o proximo minuto.
+    $before = if (Test-Path -LiteralPath $InventoryOutput) { (Get-Item -LiteralPath $InventoryOutput).LastWriteTimeUtc } else { [datetime]::MinValue }
+    Start-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName
+    $written = $false
+    for ($i = 0; $i -lt 45; $i++) {
+        Start-Sleep -Seconds 2
+        $state = (Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName).State
+        if ((Test-Path -LiteralPath $InventoryOutput) -and (Get-Item -LiteralPath $InventoryOutput).LastWriteTimeUtc -gt $before -and $state -ne 'Running') {
+            $written = $true
+            break
+        }
+    }
+    if (-not $written) { throw "Inventario de VMs nao gerou $InventoryOutput em 90s. Veja os logs em $LogDir." }
+    $content = [IO.File]::ReadAllLines($InventoryOutput)
+    $ok = @($content | Where-Object { $_ -match '^hypervisor_inventory_success 1$' }).Count -gt 0
+    $vmCount = @($content | Where-Object { $_ -like 'hypervisor_vm_info{*' }).Count
+    $problems = ($content | Where-Object { $_ -like 'hypervisor_inventory_problems *' } | Select-Object -First 1) -replace '^\S+\s+', ''
+    if (-not $ok) { throw "Inventario de VMs falhou na primeira execucao. Veja os logs em $LogDir." }
+    $note = if ($problems -and $problems -ne '0') { " ($problems aviso(s); veja $LogDir)" } else { '' }
+    Log "Inventario de VMs ativo: $vmCount VM(s), atualizado a cada minuto$note."
+}
+
 # A presenca dos cmdlets nao confirma que o Hyper-V local esta ativo.
 function Test-HyperV {
     $svc = Get-Service -Name vmms -ErrorAction SilentlyContinue
@@ -94,7 +196,7 @@ switch ($Modules) {
             if ([Console]::IsInputRedirected) {
                 Log 'Hyper-V detectado sem terminal interativo. Use -Modules hyperv para habilitar.'
             } else {
-                $answer = Read-Host 'Hyper-V detectado. Habilitar metricas e logs administrativos? [S/n]'
+                $answer = Read-Host 'Hyper-V detectado. Habilitar metricas, inventario de VMs e logs administrativos? [S/n]'
                 if ($answer -match '^(|s|sim|y|yes)$') { $hypervEnabled = $true }
             }
         }
@@ -119,25 +221,13 @@ $priorAuto = $false
 $target = Join-Path $ConfigDir 'config.alloy'
 try {
     Copy-Item -LiteralPath $Source -Destination (Join-Path $stage 'config.alloy')
+    $stageInventory = $null
     if ($hypervEnabled) {
-        $localModule = Join-Path $PSScriptRoot 'hyperv.alloy'
-        $stageModule = Join-Path $stage 'hyperv.alloy'
-        if (Test-Path -LiteralPath $localModule -PathType Leaf) {
-            Copy-Item -LiteralPath $localModule -Destination $stageModule
-        } else {
-            # Mesma origem e referencia do alloy.ps1 (ALLOY_REF; padrao: main).
-            $ref = if ($env:ALLOY_REF) { $env:ALLOY_REF } else { 'main' }
-            if ($ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or $ref.Contains('..')) {
-                throw "ALLOY_REF invalido: $ref"
-            }
-            Log "Baixando hyperv.alloy (ref $ref)..."
-            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            $raw = "https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ref/monitoring/alloy/windows/hyperv.alloy"
-            Invoke-WebRequest -Uri $raw -OutFile $stageModule -UseBasicParsing -Headers @{ 'User-Agent' = 'AssessoriaTech-Alloy-Installer/1.0' }
-            if (-not (Test-Path -LiteralPath $stageModule) -or (Get-Item -LiteralPath $stageModule).Length -eq 0) {
-                throw 'Download de hyperv.alloy vazio.'
-            }
-        }
+        Copy-ModuleFile 'hyperv.alloy' (Join-Path $stage 'hyperv.alloy')
+        # O alloy validate do diretorio de stage so le *.alloy.
+        $stageInventory = Join-Path $stage $InventoryName
+        Copy-ModuleFile $InventoryName $stageInventory
+        Assert-ScriptSyntax $stageInventory
     }
     if (Test-Path -LiteralPath $ConfigDir -PathType Container) {
         Get-ChildItem -LiteralPath $ConfigDir -Filter '*.alloy' -File | ForEach-Object {
@@ -169,7 +259,10 @@ try {
 
     Log 'Validando a configuracao completa antes de alterar o servico...'
     & $Exe validate $stage
-    if ($LASTEXITCODE -ne 0) { throw 'Configuracao invalida. Instalacao ativa preservada.' }
+    if ($LASTEXITCODE -ne 0) {
+        $hint = if ($hypervEnabled) { ' O modulo Hyper-V requer Alloy v1.11+ (use Atualizar Alloy).' } else { '' }
+        throw "Configuracao invalida. Instalacao ativa preservada.$hint"
+    }
 
     Ensure-Directory $Base
     Ensure-Directory $ConfigDir
@@ -179,6 +272,14 @@ try {
     Set-PrivateDirectoryAcl $ConfigDir
     Set-PrivateDirectoryAcl $DataDir
     Set-PrivateDirectoryAcl $BackupDir
+    if ($hypervEnabled) {
+        # scripts\ guarda codigo executado como SYSTEM: so SYSTEM e Administradores.
+        foreach ($dir in @($ScriptsDir, $TextfileDir, $LogDir)) {
+            Ensure-Directory $dir
+            Set-PrivateDirectoryAcl $dir
+        }
+        Ensure-Directory $InventoryState
+    }
 
     if (-not (Test-Path -LiteralPath $Registry)) { throw 'Registro do servico Alloy ausente.' }
     $reg = Get-ItemProperty -LiteralPath $Registry
@@ -207,7 +308,8 @@ try {
     $argsChanged = ($priorArgs -join [char]10) -cne ($argsNew -join [char]10)
     $mustApply = $configChanged -or $moduleChanged -or $argsChanged -or $Upgrade -or -not $priorRunning -or -not $priorAuto
     if (-not $mustApply) {
-        Log 'Nenhuma alteracao encontrada; servico mantido em execucao.'
+        Log 'Nenhuma alteracao na configuracao; servico mantido em execucao.'
+        Sync-HypervisorInventory $hypervEnabled $stageInventory
         return
     }
 
@@ -241,6 +343,10 @@ try {
     Start-Service -Name $Service -ErrorAction Stop
     if (-not (Ready)) { throw 'Alloy nao ficou pronto (127.0.0.1:12345).'}
     Log "Alloy ativo e pronto. Modulos: Windows$(if ($hypervEnabled) { ' + Hyper-V' })."
+    # Configuracao confirmada: uma falha do inventario daqui em diante e
+    # reportada, mas nao desfaz o Alloy que ja esta funcionando.
+    $applied = $false
+    Sync-HypervisorInventory $hypervEnabled $stageInventory
 } catch {
     $original = $_
     if ($applied -and $backup) {

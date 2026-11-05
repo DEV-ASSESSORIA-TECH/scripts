@@ -148,6 +148,38 @@ function Write-Query([string]$Label, [string]$Datasource, [string]$Expr) {
     Write-UiText ((' ' * 23) + (Get-ExploreUrl $Datasource $Expr)) 'DarkGray'
 }
 
+# Tarefa agendada e ultimo arquivo gerado pelo inventario de VMs.
+function Show-InventoryDiagnostics {
+    Write-UiSection 'INVENTARIO DE VMS'
+    $task = Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -ErrorAction SilentlyContinue
+    if (-not $task) {
+        Write-UiRow 'Tarefa' 'err' 'ausente: use [1] Reaplicar configuracao'
+    } else {
+        $info = Get-ScheduledTaskInfo -InputObject $task -ErrorAction SilentlyContinue
+        $last = 'nunca executada'
+        if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) {
+            $last = 'ultima ' + $info.LastRunTime.ToString('dd/MM HH:mm') + ', codigo ' + $info.LastTaskResult
+        }
+        $kind = 'ok'
+        if ([string]$task.State -eq 'Disabled') { $kind = 'err' }
+        elseif (-not $info -or $info.LastTaskResult -ne 0) { $kind = 'warn' }
+        Write-UiRow 'Tarefa' $kind ("$($task.State) - $last")
+    }
+    if (Test-Path -LiteralPath $InventoryOutput -PathType Leaf) {
+        $item = Get-Item -LiteralPath $InventoryOutput
+        $age = [int]((Get-Date) - $item.LastWriteTime).TotalSeconds
+        $content = [IO.File]::ReadAllLines($InventoryOutput)
+        $ok = @($content | Where-Object { $_ -match '^hypervisor_inventory_success 1$' }).Count -gt 0
+        $vms = @($content | Where-Object { $_ -like 'hypervisor_vm_info{*' }).Count
+        $kind = if ($ok -and $age -lt 180) { 'ok' } elseif ($ok) { 'warn' } else { 'err' }
+        $text = if ($ok) { "$vms VM(s), atualizado ha ${age}s" } else { "ultima execucao falhou (ha ${age}s)" }
+        Write-UiRow 'Saida' $kind $text
+    } else {
+        Write-UiRow 'Saida' 'err' 'hypervisor.prom ausente'
+    }
+    Write-UiRow 'Logs' 'none' "$LogDir (retencao 14 dias)"
+}
+
 function Show-AlloyDiagnostics {
     $hostName = Get-AlloyHostName
 
@@ -196,6 +228,8 @@ function Show-AlloyDiagnostics {
         }
     }
 
+    if (Test-HyperVModule) { Show-InventoryDiagnostics }
+
     Write-UiSection 'CONECTIVIDADE'
     Test-Endpoint 'Auth' 'auth.assessoriatech.com'
     Test-Endpoint 'Mon' 'mon.assessoriatech.com'
@@ -205,6 +239,7 @@ function Show-AlloyDiagnostics {
     Write-Query 'Logs' $GrafanaDsLogs "{job=`"windows-eventlog`",host=`"$hostName`"}"
     if (Test-HyperVModule) {
         Write-Query 'Hyper-V' $GrafanaDsMetrics "up{job=`"integrations/hyperv`",host=`"$hostName`"}"
+        Write-Query 'Inventario' $GrafanaDsMetrics "hypervisor_inventory_success{job=`"integrations/hypervisor`",host=`"$hostName`"}"
         Write-Query 'Logs Hyper-V' $GrafanaDsLogs "{job=`"hyperv-eventlog`",host=`"$hostName`"}"
     }
     Write-Host ''
