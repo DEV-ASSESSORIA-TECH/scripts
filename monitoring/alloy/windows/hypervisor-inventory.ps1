@@ -50,7 +50,7 @@ function Write-InventoryLog([string]$Text) {
         if (-not (Test-Path -LiteralPath $LogDir -PathType Container)) { return }
         $file = Join-Path $LogDir ('hypervisor-inventory-' + (Get-Date -Format 'yyyyMMdd') + '.log')
         $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  ' + $Text
-        [IO.File]::AppendAllText($file, $line + "`r`n", [Text.Encoding]::ASCII)
+        [IO.File]::AppendAllText($file, $line + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
     } catch { }
 }
 
@@ -98,6 +98,25 @@ function Add-Sample([string]$Name, [string]$Help, $Labels, $Value) {
 
 # Escrita atomica: grava .tmp (ignorado pelo coletor) e substitui o .prom.
 # O textfile collector exige LF e uma quebra de linha no final.
+# Substitui Target por Source. [NullString]::Value: o PowerShell converteria
+# $null em "" e o .NET recusaria o caminho de backup. Nova tentativa caso o
+# Alloy esteja lendo o arquivo no instante da troca.
+function Move-Replace([string]$Source, [string]$Target) {
+    for ($i = 1; $i -le 5; $i++) {
+        try {
+            if (Test-Path -LiteralPath $Target -PathType Leaf) {
+                [IO.File]::Replace($Source, $Target, [NullString]::Value)
+            } else {
+                [IO.File]::Move($Source, $Target)
+            }
+            return
+        } catch {
+            if ($i -eq 5) { throw }
+            Start-Sleep -Milliseconds 300
+        }
+    }
+}
+
 function Save-PromFile {
     $builder = New-Object System.Text.StringBuilder
     foreach ($name in $script:Metrics.Keys) {
@@ -108,11 +127,7 @@ function Save-PromFile {
     }
     $tmp = $OutFile + '.tmp'
     [IO.File]::WriteAllText($tmp, $builder.ToString(), (New-Object System.Text.UTF8Encoding($false)))
-    if (Test-Path -LiteralPath $OutFile -PathType Leaf) {
-        [IO.File]::Replace($tmp, $OutFile, $null)
-    } else {
-        [IO.File]::Move($tmp, $OutFile)
-    }
+    Move-Replace $tmp $OutFile
 }
 
 # ------------------------------------------------------- sistema convidado
@@ -133,8 +148,7 @@ function Save-GuestCache($Cache) {
         if (-not (Test-Path -LiteralPath $StateDir -PathType Container)) { return }
         $tmp = $CacheFile + '.tmp'
         [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $Cache -Depth 4), (New-Object System.Text.UTF8Encoding($false)))
-        if (Test-Path -LiteralPath $CacheFile -PathType Leaf) { [IO.File]::Replace($tmp, $CacheFile, $null) }
-        else { [IO.File]::Move($tmp, $CacheFile) }
+        Move-Replace $tmp $CacheFile
     } catch { Add-Problem "falha ao gravar o cache de convidados: $($_.Exception.Message)" }
 }
 
@@ -209,7 +223,7 @@ function Invoke-Inventory {
     try { $osVersion = [string](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).Version } catch { }
     $hostLabels = [ordered]@{ platform = $Platform; version = $osVersion }
     Add-Sample 'hypervisor_host_info' 'Plataforma do hypervisor (valor sempre 1).' $hostLabels 1
-    Add-Sample 'hypervisor_host_cpu_count' 'Processadores logicos do host.' $null $vmHost.LogicalProcessorCount
+    Add-Sample 'hypervisor_host_cpus' 'Processadores logicos do host.' $null $vmHost.LogicalProcessorCount
     Add-Sample 'hypervisor_host_memory_bytes' 'Memoria fisica do host.' $null $vmHost.MemoryCapacity
 
     $vms = @(Get-VM -ErrorAction Stop)
@@ -263,7 +277,7 @@ function Invoke-Inventory {
             Add-Sample 'hypervisor_vm_name_matches_guest' 'Nome da VM igual ao hostname do convidado (1 = sim).' $vmLabel ([int]($name.ToLowerInvariant() -eq $guestHost))
         }
         Add-Sample 'hypervisor_vm_uptime_seconds' 'Tempo ligada.' $vmLabel $vm.Uptime.TotalSeconds
-        Add-Sample 'hypervisor_vm_cpu_count' 'vCPUs configuradas.' $vmLabel $vm.ProcessorCount
+        Add-Sample 'hypervisor_vm_cpus' 'vCPUs configuradas.' $vmLabel $vm.ProcessorCount
         Add-Sample 'hypervisor_vm_memory_startup_bytes' 'Memoria inicial configurada.' $vmLabel $vm.MemoryStartup
         Add-Sample 'hypervisor_vm_memory_assigned_bytes' 'Memoria atribuida agora (0 se desligada).' $vmLabel $vm.MemoryAssigned
         Add-Sample 'hypervisor_vm_dynamic_memory' 'Memoria dinamica habilitada (1 = sim).' $vmLabel ([bool]$vm.DynamicMemoryEnabled)
@@ -356,5 +370,5 @@ try {
     $success = 0
 }
 
-Write-InventoryLog ('{0} vms={1} avisos={2} duracao={3}s' -f $(if ($success) { 'OK' } else { 'FALHA' }), $count, $script:Problems.Count, [Math]::Round($duration, 1))
+Write-InventoryLog ('{0} vms={1} avisos={2} duracao={3}s' -f $(if ($success) { 'OK' } else { 'FALHA' }), $count, $script:Problems.Count, [Math]::Round($duration, 1).ToString($Invariant))
 if (-not $success) { exit 1 }
