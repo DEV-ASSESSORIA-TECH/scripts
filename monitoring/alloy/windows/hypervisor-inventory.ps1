@@ -201,18 +201,66 @@ function Get-StateName([string]$State) {
     }
 }
 
-# Nome de instancia usado pelos contadores "Hyper-V Virtual Storage Device"
-# (label device do coletor hyperv): caminho com "\" trocado por "-".
+# --------------------------------------------- ligacao com os contadores
+# Os labels device e adapter do coletor hyperv sao os nomes de instancia dos
+# contadores "Hyper-V Virtual Storage Device" e "Hyper-V Virtual Network
+# Adapter". O nome e fixado quando a VM liga: disco movido ou VM renomeada com
+# ela ligada mantem o nome antigo ate reiniciar. Por isso o inventario le os
+# nomes reais e casa cada disco/placa, em vez de so calcular o nome esperado.
+
+# Disco: caminho com "\" trocado por "-" (os .vmgs vem com o prefixo "--?-").
 function Get-StorageDeviceName([string]$Path) {
     if (-not $Path) { return '' }
     return $Path.Replace('\', '-')
 }
 
-# Nome de instancia usado pelos contadores "Hyper-V Virtual Network Adapter"
-# (label adapter do coletor hyperv): <VM>_<Placa>_<VMGUID>--<PlacaGUID>.
-function Get-NetworkAdapterName([string]$VmName, [string]$AdapterName, [string]$Id) {
-    $suffix = ($Id -replace '^Microsoft:', '').Replace('\', '--')
-    return '{0}_{1}_{2}' -f $VmName, $AdapterName, $suffix
+# Placa: <VM>_<Placa>_<VMGUID>--<PlacaGUID>. Os GUIDs nao mudam.
+function Get-NetworkAdapterSuffix([string]$Id) {
+    return ($Id -replace '^Microsoft:', '').Replace('\', '--')
+}
+
+# Nomes de instancia atuais, pelas classes WMI de desempenho (nomes que nao
+# mudam com o idioma do Windows). Lista vazia se a classe nao responder.
+function Get-CounterInstances([string]$Class) {
+    try {
+        return @(Get-CimInstance -ClassName $Class -Property Name -ErrorAction Stop |
+            ForEach-Object { [string]$_.Name } |
+            Where-Object { $_ -and $_ -ne '_Total' })
+    } catch {
+        Add-Problem "contadores $Class indisponiveis: $($_.Exception.Message)"
+        return @()
+    }
+}
+
+# Casa cada item com uma instancia real, em duas passadas: primeiro o nome
+# exato (com ou sem "--?-"); depois, entre as instancias que sobraram, um
+# final unico (arquivo do disco ou GUIDs da placa). match: exact, suffix ou
+# none (VM desligada nao tem instancia).
+function Resolve-CounterNames($Items, $Instances) {
+    $claimed = @{}
+    foreach ($item in $Items) {
+        $item.Instance = $item.Expected
+        $item.Match = 'none'
+        foreach ($candidate in @($item.Expected, ('--?-' + $item.Expected))) {
+            $hit = @($Instances | Where-Object { $_ -eq $candidate -and -not $claimed.ContainsKey($_) }) | Select-Object -First 1
+            if ($hit) {
+                $item.Instance = $hit
+                $item.Match = 'exact'
+                $claimed[$hit] = $true
+                break
+            }
+        }
+    }
+    foreach ($item in @($Items | Where-Object { $_.Match -eq 'none' -and $_.Suffix })) {
+        $hits = @($Instances | Where-Object {
+            -not $claimed.ContainsKey($_) -and $_.EndsWith($item.Suffix, [StringComparison]::OrdinalIgnoreCase)
+        })
+        if ($hits.Count -eq 1) {
+            $item.Instance = $hits[0]
+            $item.Match = 'suffix'
+            $claimed[$hits[0]] = $true
+        }
+    }
 }
 
 # -------------------------------------------------------------- inventario
@@ -230,6 +278,8 @@ function Invoke-Inventory {
     $kvp = Get-GuestKvp
     $cache = Read-GuestCache
     $seen = @{}
+    $disks = New-Object System.Collections.Generic.List[object]
+    $nics = New-Object System.Collections.Generic.List[object]
 
     foreach ($vm in $vms) {
         $name = [string]$vm.Name
@@ -311,26 +361,45 @@ function Invoke-Inventory {
                     Add-Sample 'hypervisor_vm_disk_size_bytes' 'Tamanho maximo do disco virtual.' $diskLabels $vhd.Size
                     Add-Sample 'hypervisor_vm_disk_file_bytes' 'Espaco ocupado pelo arquivo do disco no host.' $diskLabels $vhd.FileSize
                 } catch { Add-Problem "$name disco ${path}: $($_.Exception.Message)" }
-                $infoDisk = [ordered]@{ vm = $name; path = $path; device = (Get-StorageDeviceName $path); controller = $controller; type = $type }
-                Add-Sample 'hypervisor_vm_disk_info' 'Disco virtual da VM (valor sempre 1). device = nome nos contadores do Hyper-V.' $infoDisk 1
+                $disks.Add(@{
+                    Vm = $name; Path = $path; Controller = $controller; Type = $type
+                    Expected = (Get-StorageDeviceName $path)
+                    Suffix = ('-' + [IO.Path]::GetFileName($path))
+                    Instance = ''; Match = ''
+                })
             }
         } catch { Add-Problem "$name discos: $($_.Exception.Message)" }
 
         try {
             foreach ($nic in @(Get-VMNetworkAdapter -VM $vm -ErrorAction Stop)) {
                 $ipv4 = @($nic.IPAddresses | Where-Object { $_ -match '^\d+\.\d+\.\d+\.\d+$' }) -join ','
-                $nicLabels = [ordered]@{
-                    vm         = $name
-                    name       = [string]$nic.Name
-                    adapter    = (Get-NetworkAdapterName $name ([string]$nic.Name) ([string]$nic.Id))
-                    adapter_id = [string]$nic.Id
-                    switch     = [string]$nic.SwitchName
-                    mac        = [string]$nic.MacAddress
-                    ipv4       = $ipv4
-                }
-                Add-Sample 'hypervisor_vm_network_info' 'Placa de rede virtual da VM (valor sempre 1). adapter = nome nos contadores do Hyper-V.' $nicLabels 1
+                $suffix = Get-NetworkAdapterSuffix ([string]$nic.Id)
+                $nics.Add(@{
+                    Vm = $name; Name = [string]$nic.Name; Id = [string]$nic.Id
+                    Switch = [string]$nic.SwitchName; Mac = [string]$nic.MacAddress; Ipv4 = $ipv4
+                    Expected = ('{0}_{1}_{2}' -f $name, [string]$nic.Name, $suffix)
+                    Suffix = ('_' + $suffix)
+                    Instance = ''; Match = ''
+                })
             }
         } catch { Add-Problem "$name rede: $($_.Exception.Message)" }
+    }
+
+    Resolve-CounterNames $disks (Get-CounterInstances 'Win32_PerfRawData_Counters_HyperVVirtualStorageDevice')
+    foreach ($d in $disks) {
+        $infoDisk = [ordered]@{
+            vm = $d.Vm; path = $d.Path; device = $d.Instance; device_match = $d.Match
+            controller = $d.Controller; type = $d.Type
+        }
+        Add-Sample 'hypervisor_vm_disk_info' 'Disco virtual da VM (valor sempre 1). device = nome nos contadores do Hyper-V; device_match: exact, suffix ou none.' $infoDisk 1
+    }
+    Resolve-CounterNames $nics (Get-CounterInstances 'Win32_PerfRawData_NvspNicStats_HyperVVirtualNetworkAdapter')
+    foreach ($n in $nics) {
+        $nicLabels = [ordered]@{
+            vm = $n.Vm; name = $n.Name; adapter = $n.Instance; adapter_match = $n.Match
+            adapter_id = $n.Id; switch = $n.Switch; mac = $n.Mac; ipv4 = $n.Ipv4
+        }
+        Add-Sample 'hypervisor_vm_network_info' 'Placa de rede virtual da VM (valor sempre 1). adapter = nome nos contadores do Hyper-V; adapter_match: exact, suffix ou none.' $nicLabels 1
     }
 
     # Cache: descarta VMs que nao existem mais neste host.
