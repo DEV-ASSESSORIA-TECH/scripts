@@ -20,11 +20,17 @@ Comandos:
   status       diagnostico (servico, eventos, conectividade, consultas)
   uninstall    remove o Alloy, mantendo credencial e configuracao [-Yes]
   purge        limpeza completa, inclui a credencial [-Yes]
+  heartbeat    configura o heartbeat (Uptime Kuma Push + Loki) [-Url <url>]
+  heartbeat-test    executa o heartbeat agora e mostra o resultado
+  heartbeat-remove  remove o heartbeat [-Yes]
   menu         abre o menu mesmo na primeira execucao
   help         esta ajuda
 
 .PARAMETER Ref
 Branch, tag ou commit do repositorio usado nos downloads (padrao: main).
+
+.PARAMETER Url
+URL de push do Uptime Kuma (comando heartbeat, sem terminal interativo).
 
 .EXAMPLE
 .\alloy.ps1
@@ -35,14 +41,16 @@ Branch, tag ou commit do repositorio usado nos downloads (padrao: main).
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('menu', 'install', 'credentials', 'check', 'rotate', 'modules', 'upgrade', 'status', 'uninstall', 'purge', 'help')]
+    [ValidateSet('menu', 'install', 'credentials', 'check', 'rotate', 'modules', 'upgrade', 'status', 'uninstall', 'purge',
+                 'heartbeat', 'heartbeat-test', 'heartbeat-remove', 'help')]
     [string]$Command = '',
     [Parameter(Position = 1)]
     [ValidateSet('auto', 'hyperv', 'none')]
     [string]$Modules = 'auto',
     [switch]$Upgrade,
     [switch]$Yes,
-    [string]$Ref
+    [string]$Ref,
+    [string]$Url
 )
 
 $ErrorActionPreference = 'Stop'
@@ -142,6 +150,12 @@ try {
         & (Join-Path $src 'uninstall.ps1') @Arguments
     }
 
+    # Heartbeat opcional: nunca sugerido na instalacao, so pelo menu [9] ou comando.
+    function Invoke-Heartbeat([hashtable]$Arguments = @{}) {
+        Save-RemoteFiles $src @('heartbeat-setup.ps1', 'heartbeat.ps1')
+        & (Join-Path $src 'heartbeat-setup.ps1') @Arguments
+    }
+
     # ------------------------------------------------------------- interativo
     function Assert-Interactive {
         if ([Console]::IsInputRedirected) { throw 'Sem terminal interativo: informe um comando (Get-Help .\alloy.ps1).' }
@@ -187,6 +201,23 @@ try {
         Wait-UiKey
     }
 
+    function Show-HeartbeatMenu {
+        while (Test-HeartbeatConfigured) {
+            Clear-UiScreen
+            Show-AlloyHeader
+            Write-UiColumns 'HEARTBEAT' 'White' '' ''
+            Write-UiColumns ' [1] Testar agora' '' ' [3] Remover' 'Red'
+            Write-UiColumns ' [2] Reconfigurar' '' '' ''
+            Write-UiRule '-'
+            switch (Read-UiKey 'Tecle a opcao (0 volta)') {
+                '1' { Invoke-Screen 'Testar heartbeat' { Invoke-Heartbeat @{ Test = $true } } }
+                '2' { Invoke-Screen 'Reconfigurar heartbeat' { Invoke-Heartbeat } }
+                '3' { Invoke-Screen 'Remover heartbeat' { Invoke-Heartbeat @{ Remove = $true } } }
+                { $_ -in @('0', 'q', 'Q', 'ESC') } { return }
+            }
+        }
+    }
+
     function Show-Menu {
         while ($true) {
             $installed = Test-AlloyInstalled
@@ -211,8 +242,9 @@ try {
             Write-UiColumns ' [3] Atualizar Alloy' '' '' ''
             Write-Host ''
             Write-UiColumns 'DIAGNOSTICO' 'White' 'REMOCAO' 'White'
+            $label9 = if (Test-HeartbeatConfigured) { 'Heartbeat' } else { 'Configurar heartbeat' }
             Write-UiColumns ' [6] Ver diagnostico' '' ' [7] Desinstalar' 'Red'
-            Write-UiColumns '' '' ' [8] Limpeza completa' 'Red'
+            Write-UiColumns " [9] $label9" '' ' [8] Limpeza completa' 'Red'
             Write-UiRule '-'
             $prompt = if ($default) { "Tecle a opcao (Enter = $default, 0 sai)" } else { 'Tecle a opcao (0 sai)' }
             $choice = Read-UiKey $prompt
@@ -234,6 +266,10 @@ try {
                 }
                 '7' { Invoke-Screen 'Desinstalar' { Invoke-Uninstall } }
                 '8' { Invoke-Screen 'Limpeza completa' { Invoke-Uninstall @{ Purge = $true } } }
+                '9' {
+                    if (Test-HeartbeatConfigured) { Show-HeartbeatMenu }
+                    else { Invoke-Screen 'Configurar heartbeat' { Invoke-Heartbeat } }
+                }
                 { $_ -in @('0', 'q', 'Q') } {
                     Clear-UiScreen
                     Show-AlloySummary
@@ -264,6 +300,13 @@ try {
         'status' { Write-UiBanner (Get-AlloyHostName); Show-AlloySummary; Show-AlloyDiagnostics }
         'uninstall' { Invoke-Uninstall @{ Yes = [bool]$Yes } }
         'purge' { Invoke-Uninstall @{ Purge = $true; Yes = [bool]$Yes } }
+        'heartbeat' {
+            $heartbeatArgs = @{}
+            if ($Url) { $heartbeatArgs.Url = $Url }
+            Invoke-Heartbeat $heartbeatArgs
+        }
+        'heartbeat-test' { Invoke-Heartbeat @{ Test = $true } }
+        'heartbeat-remove' { Invoke-Heartbeat @{ Remove = $true; Yes = [bool]$Yes } }
     }
 } finally {
     if ($script:HttpClient) { $script:HttpClient.Dispose() }

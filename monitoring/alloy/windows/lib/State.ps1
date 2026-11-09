@@ -18,6 +18,12 @@ function Test-CredentialPresent {
     return ($item.Length -gt 0) -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
 }
 function Test-HyperVModule { Test-Path -LiteralPath $HyperVFile -PathType Leaf }
+function Test-HeartbeatConfigured {
+    (Test-Path -LiteralPath $HeartbeatUrlFile -PathType Leaf) -or ($null -ne (Get-HeartbeatTask))
+}
+function Get-HeartbeatTask {
+    Get-ScheduledTask -TaskPath $HeartbeatTaskPath -TaskName $HeartbeatTaskName -ErrorAction SilentlyContinue
+}
 function Test-FirstRun { -not (Test-CredentialPresent) -and -not (Test-AlloyInstalled) }
 
 # O executavel do Alloy nao traz versao nos metadados. Ordem: registro de
@@ -79,6 +85,36 @@ function Get-ServiceStatus {
     return @{ Kind = 'err'; Text = 'parado' }
 }
 
+# Ultima execucao do heartbeat (last.json) com a idade em segundos, ou $null.
+function Get-HeartbeatLast {
+    if (-not (Test-Path -LiteralPath $HeartbeatLast -PathType Leaf)) { return $null }
+    try {
+        $last = [IO.File]::ReadAllText($HeartbeatLast) | ConvertFrom-Json
+        # PowerShell 7 converte datas ISO do JSON; o 5.1 entrega texto.
+        $time = if ($last.time_utc -is [datetime]) { [DateTimeOffset]$last.time_utc } else {
+            [DateTimeOffset]::Parse([string]$last.time_utc, [Globalization.CultureInfo]::InvariantCulture)
+        }
+        $age = [int]([DateTimeOffset]::UtcNow - $time).TotalSeconds
+        $last | Add-Member -NotePropertyName age -NotePropertyValue ([Math]::Max(0, $age)) -Force
+        return $last
+    } catch { return $null }
+}
+
+# Estado do heartbeat: @{ Kind; Text }, ou $null quando nao configurado.
+function Get-HeartbeatStatus {
+    if (-not (Test-HeartbeatConfigured)) { return $null }
+    $task = Get-HeartbeatTask
+    if (-not $task) { return @{ Kind = 'warn'; Text = 'tarefa ausente: reconfigure em [9]' } }
+    if ([string]$task.State -eq 'Disabled') { return @{ Kind = 'err'; Text = 'tarefa desabilitada' } }
+    $last = Get-HeartbeatLast
+    if (-not $last) { return @{ Kind = 'warn'; Text = 'sem execucao registrada' } }
+    $text = "ha $($last.age)s: Kuma $($last.kuma), Loki $($last.loki), alloy=$($last.alloy)"
+    if ($last.age -gt 180) { return @{ Kind = 'err'; Text = $text } }
+    if ($last.kuma -ne '200') { return @{ Kind = 'err'; Text = $text } }
+    if ($last.loki -ne '204') { return @{ Kind = 'warn'; Text = $text } }
+    return @{ Kind = 'ok'; Text = $text }
+}
+
 # $script:LastStatus/$script:LastAction sao definidos pelo menu do alloy.ps1.
 function Show-AlloyHeader {
     $status = Get-ServiceStatus
@@ -96,6 +132,8 @@ function Show-AlloyHeader {
     $modules = 'Windows'
     if (Test-HyperVModule) { $modules += ' + Hyper-V' }
     Write-UiRow 'Modulos' 'none' $modules
+    $heartbeat = Get-HeartbeatStatus
+    if ($heartbeat) { Write-UiRow 'Heartbeat' $heartbeat.Kind $heartbeat.Text }
     if ($script:LocalMode) {
         Write-UiRow 'Origem' 'none' 'arquivos locais'
     } elseif ((Get-AlloyRef) -ne 'main') {
@@ -180,6 +218,30 @@ function Show-InventoryDiagnostics {
     Write-UiRow 'Logs' 'none' "$LogDir (retencao 14 dias)"
 }
 
+# Tarefa, ultima execucao e linha enviada ao Loki pelo heartbeat.
+function Show-HeartbeatDiagnostics {
+    Write-UiSection 'HEARTBEAT (UPTIME KUMA + LOKI)'
+    $task = Get-HeartbeatTask
+    if (-not $task) {
+        Write-UiRow 'Tarefa' 'err' 'ausente: reconfigure em [9]'
+    } else {
+        $info = Get-ScheduledTaskInfo -InputObject $task -ErrorAction SilentlyContinue
+        $kind = if ([string]$task.State -eq 'Disabled') { 'err' } elseif ($info -and $info.LastTaskResult -eq 0) { 'ok' } else { 'warn' }
+        $code = if ($info) { $info.LastTaskResult } else { '?' }
+        Write-UiRow 'Tarefa' $kind "$($task.State) - codigo $code"
+    }
+    $status = Get-HeartbeatStatus
+    $last = Get-HeartbeatLast
+    if ($last) {
+        Write-UiRow 'Ultima' $status.Kind $status.Text
+        Write-UiRow 'Linha' 'none' $last.line
+    } else {
+        Write-UiRow 'Ultima' 'warn' 'sem execucao registrada'
+    }
+    Write-UiRow 'URL' 'none' "$HeartbeatUrlFile (so SYSTEM e Administradores)"
+    Write-UiRow 'Logs' 'none' "$HeartbeatLogDir (retencao 14 dias)"
+}
+
 function Show-AlloyDiagnostics {
     $hostName = Get-AlloyHostName
 
@@ -229,6 +291,7 @@ function Show-AlloyDiagnostics {
     }
 
     if (Test-HyperVModule) { Show-InventoryDiagnostics }
+    if (Test-HeartbeatConfigured) { Show-HeartbeatDiagnostics }
 
     Write-UiSection 'CONECTIVIDADE'
     Test-Endpoint 'Auth' 'auth.assessoriatech.com'
@@ -241,6 +304,9 @@ function Show-AlloyDiagnostics {
         Write-Query 'Hyper-V' $GrafanaDsMetrics "up{job=`"integrations/hyperv`",host=`"$hostName`"}"
         Write-Query 'Inventario' $GrafanaDsMetrics "hypervisor_inventory_success{job=`"integrations/hypervisor`",host=`"$hostName`"}"
         Write-Query 'Logs Hyper-V' $GrafanaDsLogs "{job=`"hyperv-eventlog`",host=`"$hostName`"}"
+    }
+    if (Test-HeartbeatConfigured) {
+        Write-Query 'Heartbeat' $GrafanaDsLogs "{job=`"alloy-heartbeat`",host=`"$hostName`"} | logfmt"
     }
     Write-Host ''
     Write-UiText '  Validar a credencial de ponta a ponta: opcao [4].' 'DarkGray'

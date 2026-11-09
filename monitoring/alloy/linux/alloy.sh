@@ -24,6 +24,12 @@ Comandos:
                remove o Alloy, mantendo credencial e configuracao
   purge [--yes]
                limpeza completa (inclui a credencial)
+  heartbeat [--url URL]
+               configura o heartbeat (Uptime Kuma Push + Loki)
+  heartbeat-test
+               executa o heartbeat agora e mostra o resultado
+  heartbeat-remove [--yes]
+               remove o heartbeat
   menu         abre o menu mesmo na primeira execucao
 
 Opcoes globais:
@@ -41,6 +47,7 @@ while (($#)); do
     -h|--help) usage; exit 0 ;;
     --ref) (($# >= 2)) || { printf 'Falta valor para --ref.\n' >&2; exit 1; }; ref_arg=$2; shift 2; continue ;;
     --ref=*) ref_arg=${1#*=} ;;
+    --url) (($# >= 2)) || { printf 'Falta valor para --url.\n' >&2; exit 1; }; cmd_args+=(--url "$2"); shift 2; continue ;;
     -*) cmd_args+=("$1") ;;
     *) if [[ -z $command ]]; then command=$1; else cmd_args+=("$1"); fi ;;
   esac
@@ -156,6 +163,12 @@ do_uninstall() {
   bash "$src/uninstall.sh" "$@"
 }
 
+# Heartbeat opcional: nunca sugerido na instalacao, so pelo menu [9] ou comando.
+do_heartbeat() {
+  fetch "$src" heartbeat-setup.sh heartbeat.sh || return 1
+  bash "$src/heartbeat-setup.sh" "$@"
+}
+
 # ---------------------------------------------------------------- interativo
 need_tty() { [[ -t 0 ]] || fail 'Sem terminal interativo: informe um comando (veja --help).'; }
 
@@ -198,8 +211,30 @@ view_screen() {
   ui_pause
 }
 
+heartbeat_menu() {
+  while heartbeat_configured; do
+    ui_clear
+    print_header
+    ui_columns 'HEARTBEAT' "$C_BOLD" '' ''
+    ui_columns ' [1] Testar agora' '' ' [3] Remover' "$C_ERR"
+    ui_columns ' [2] Reconfigurar' '' '' ''
+    ui_rule -
+    printf '  Tecle a opcao (0 volta): '
+    ui_readkey || { printf '\n'; return 0; }
+    [[ $UI_KEY == ESC ]] || printf '%s' "$UI_KEY"
+    printf '\n'
+    case "$UI_KEY" in
+      1) run_screen 'Testar heartbeat' do_heartbeat --test ;;
+      2) run_screen 'Reconfigurar heartbeat' do_heartbeat ;;
+      3) run_screen 'Remover heartbeat' do_heartbeat --remove ;;
+      0|q|Q|ESC) return 0 ;;
+      *) ;;
+    esac
+  done
+}
+
 menu() {
-  local default label1 label2 color2 docker_target label5 prompt
+  local default label1 label2 color2 docker_target label5 label9 prompt
   while :; do
     default=''
     if ! alloy_installed || ! service_active; then default=1; fi
@@ -221,8 +256,9 @@ menu() {
     ui_columns ' [3] Atualizar Alloy' '' '' ''
     printf '\n'
     ui_columns 'DIAGNOSTICO' "$C_BOLD" 'REMOCAO' "$C_BOLD"
+    if heartbeat_configured; then label9='Heartbeat'; else label9='Configurar heartbeat'; fi
     ui_columns ' [6] Ver diagnostico' '' ' [7] Desinstalar' "$C_ERR"
-    ui_columns '' '' ' [8] Limpeza completa' "$C_ERR"
+    ui_columns " [9] $label9" '' ' [8] Limpeza completa' "$C_ERR"
     ui_rule -
     prompt='Tecle a opcao (0 sai)'
     [[ -n $default ]] && prompt="Tecle a opcao (Enter = $default, 0 sai)"
@@ -244,6 +280,11 @@ menu() {
       6) view_screen diagnose ;;
       7) run_screen 'Desinstalar' do_uninstall ;;
       8) run_screen 'Limpeza completa' do_uninstall --purge ;;
+      9) if heartbeat_configured; then
+           heartbeat_menu
+         else
+           run_screen 'Configurar heartbeat' do_heartbeat
+         fi ;;
       0|q|Q)
         ui_clear
         print_summary
@@ -269,5 +310,8 @@ case "$command" in
   status) ui_banner "$(host_name)"; print_summary; diagnose ;;
   uninstall) do_uninstall "${cmd_args[@]}" ;;
   purge) do_uninstall --purge "${cmd_args[@]}" ;;
+  heartbeat) do_heartbeat "${cmd_args[@]}" ;;
+  heartbeat-test) do_heartbeat --test ;;
+  heartbeat-remove) do_heartbeat --remove "${cmd_args[@]}" ;;
   *) usage >&2; fail "Comando desconhecido: $command" ;;
 esac

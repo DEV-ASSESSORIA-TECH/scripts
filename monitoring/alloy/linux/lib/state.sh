@@ -19,6 +19,36 @@ credential_present() { [[ -s $SECRET && ! -L $SECRET ]]; }
 docker_module() { [[ -f $ETC_DIR/docker.alloy ]]; }
 docker_available() { command -v docker >/dev/null 2>&1 && [[ -S /var/run/docker.sock ]]; }
 first_run() { ! credential_present && ! alloy_installed; }
+heartbeat_configured() { [[ -s $HEARTBEAT_URL_FILE || -f $HEARTBEAT_TIMER_FILE ]]; }
+heartbeat_timer_enabled() { systemctl is-enabled --quiet "$HEARTBEAT_UNIT.timer" 2>/dev/null; }
+
+# last_field ARQUIVO CAMPO: valor de "campo=valor" no arquivo last do heartbeat.
+last_field() {
+  local value
+  value=$(sed -n "s/^$2=//p" "$1" 2>/dev/null | head -n 1)
+  [[ -n $value ]] || return 1
+  printf '%s' "$value"
+}
+
+# Estado do heartbeat em "marcador|texto"; vazio quando nao configurado.
+heartbeat_status() {
+  local last=$HEARTBEAT_STATE/last ts age kuma loki text
+  heartbeat_configured || return 0
+  if ! heartbeat_timer_enabled; then printf 'warn|timer desativado: reconfigure em [9]'; return 0; fi
+  if ! ts=$(last_field "$last" time); then printf 'warn|sem execucao registrada'; return 0; fi
+  age=$(($(date +%s) - ts))
+  ((age < 0)) && age=0
+  kuma=$(last_field "$last" kuma || printf '?')
+  loki=$(last_field "$last" loki || printf '?')
+  text="ha ${age}s: Kuma $kuma, Loki $loki, alloy=$(last_field "$last" alloy || printf '?')"
+  if ((age > 180)) || [[ $kuma != 200 ]]; then
+    printf 'err|%s' "$text"
+  elif [[ $loki != 204 ]]; then
+    printf 'warn|%s' "$text"
+  else
+    printf 'ok|%s' "$text"
+  fi
+}
 
 # Conta de servico gravada na credencial. Nunca imprime a senha.
 credential_user() {
@@ -53,7 +83,7 @@ service_status() {
 
 # LAST_STATUS/LAST_ACTION sao definidos pelo menu do alloy.sh.
 print_header() {
-  local status badge text cred_badge cred_text mods
+  local status badge text cred_badge cred_text mods heartbeat
   status=$(service_status)
   badge=${status%%|*}
   text=${status#*|}
@@ -72,6 +102,8 @@ print_header() {
   ui_row Servico "$badge" "$text"
   ui_row Credencial "$cred_badge" "$cred_text"
   ui_row Modulos none "$mods"
+  heartbeat=$(heartbeat_status)
+  [[ -n $heartbeat ]] && ui_row Heartbeat "${heartbeat%%|*}" "${heartbeat#*|}"
   if [[ $ALLOY_LOCAL == 1 ]]; then
     ui_row Origem none 'arquivos locais'
   elif [[ $ALLOY_REF != main ]]; then
@@ -120,6 +152,22 @@ print_query() { # print_query ROTULO DATASOURCE CONSULTA
   printf '                       %s%s%s\n' "$C_DIM" "$(explore_url "$2" "$3")" "$C_RESET"
 }
 
+# Timer, ultima execucao e linha enviada ao Loki pelo heartbeat.
+diagnose_heartbeat() {
+  local status line
+  ui_section 'HEARTBEAT (UPTIME KUMA + LOKI)'
+  if heartbeat_timer_enabled; then
+    ui_row Timer ok "ativo, proxima $(systemctl show "$HEARTBEAT_UNIT.timer" --property=NextElapseUSecRealtime --value 2>/dev/null || printf '?')"
+  else
+    ui_row Timer err 'desativado: reconfigure em [9]'
+  fi
+  status=$(heartbeat_status)
+  ui_row Ultima "${status%%|*}" "${status#*|}"
+  if line=$(last_field "$HEARTBEAT_STATE/last" line); then ui_row Linha none "$line"; fi
+  ui_row URL none "$HEARTBEAT_URL_FILE (root, 0600)"
+  ui_row Logs none "journalctl -u $HEARTBEAT_UNIT"
+}
+
 diagnose() {
   local host status since files issues count
   host=$(host_name)
@@ -155,6 +203,8 @@ diagnose() {
     fi
   fi
 
+  if heartbeat_configured; then diagnose_heartbeat; fi
+
   ui_section CONECTIVIDADE
   check_endpoint Auth auth.assessoriatech.com
   check_endpoint Mon mon.assessoriatech.com
@@ -165,6 +215,9 @@ diagnose() {
   if docker_module; then
     print_query Docker "$GRAFANA_DS_METRICS" "up{job=\"integrations/docker\",host=\"$host\"}"
     print_query 'Logs Docker' "$GRAFANA_DS_LOGS" "{job=\"docker\",host=\"$host\"}"
+  fi
+  if heartbeat_configured; then
+    print_query Heartbeat "$GRAFANA_DS_LOGS" "{job=\"alloy-heartbeat\",host=\"$(cat /proc/sys/kernel/hostname 2>/dev/null || hostname)\"} | logfmt"
   fi
   printf '\n  %sValidar a credencial de ponta a ponta: opcao [4].%s\n' "$C_DIM" "$C_RESET"
 }

@@ -20,6 +20,14 @@ $LogDir            = Join-Path $Base 'logs'
 $InventoryOutput   = Join-Path $Base 'textfile\hypervisor.prom'
 $InventoryTaskPath = '\GrafanaLabs\'
 $InventoryTaskName = 'Alloy Hypervisor Inventory'
+# Heartbeat opcional (Uptime Kuma + Loki), ver heartbeat-setup.ps1.
+$HeartbeatDir      = Join-Path $Base 'heartbeat'
+$HeartbeatUrlFile  = Join-Path $HeartbeatDir 'kuma-url'
+$HeartbeatScript   = Join-Path $HeartbeatDir 'heartbeat.ps1'
+$HeartbeatLast     = Join-Path $HeartbeatDir 'last.json'
+$HeartbeatLogDir   = Join-Path $HeartbeatDir 'logs'
+$HeartbeatTaskPath = '\GrafanaLabs\'
+$HeartbeatTaskName = 'Alloy Heartbeat'
 $UninstallKeys = @(
     'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
     'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
