@@ -165,7 +165,7 @@ do_uninstall() {
 
 # Heartbeat opcional: nunca sugerido na instalacao, so pelo menu [9] ou comando.
 do_heartbeat() {
-  fetch "$src" heartbeat-setup.sh heartbeat.sh || return 1
+  fetch "$src" heartbeat-setup.sh heartbeat.py || return 1
   bash "$src/heartbeat-setup.sh" "$@"
 }
 

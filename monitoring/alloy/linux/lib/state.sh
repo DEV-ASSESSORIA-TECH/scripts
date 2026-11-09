@@ -127,7 +127,7 @@ print_summary() {
 # Teste de alcance: qualquer resposta HTTP comprova DNS, rota e TLS.
 check_endpoint() {
   local code
-  code=$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "https://$2/" 2>/dev/null) || code=000
+  code=$(curl -sS -A "$USER_AGENT" -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "https://$2/" 2>/dev/null) || code=000
   if [[ $code == 000 ]]; then
     ui_row "$1" err "$2 - sem resposta (DNS, rota ou TLS)"
   else

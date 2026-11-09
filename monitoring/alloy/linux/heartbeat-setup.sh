@@ -4,7 +4,7 @@
 # Opcional e independente da instalacao do Alloy (menu [9] do alloy.sh).
 # Sem parametros: configura. Pede a URL de push copiada do Uptime Kuma, faz
 # uma batida de teste e so entao grava a URL (root, 0600), instala o
-# heartbeat.sh e o timer systemd, conferindo a primeira execucao. A URL
+# heartbeat.py e o timer systemd, conferindo a primeira execucao. A URL
 # completa e informada na configuracao: o endereco do Kuma nao fica no
 # repositorio.
 #
@@ -69,7 +69,7 @@ show_result() {
   ui_row Alloy none "$line"
   case "$loki" in
     204) kind=ok text='linha gravada (job alloy-heartbeat)' ;;
-    sem_credencial) kind=warn text='sem credencial do Alloy: so o Kuma recebe a batida' ;;
+    sem_credencial) kind=warn text='credencial do Alloy ausente ou ilegivel: so o Kuma recebe a batida' ;;
     *) kind=err text="falhou: $loki" ;;
   esac
   ui_row Loki "$kind" "$text"
@@ -89,12 +89,9 @@ run_service() {
   show_result "$HEARTBEAT_STATE/last"
 }
 
+# Credencial do Alloy lida direto (root:alloy 0640) pelo grupo alloy; a URL do
+# Kuma, que so o heartbeat usa, chega por LoadCredential (o arquivo sempre existe).
 write_units() {
-  local oauth_line=''
-  # LoadCredential falha se o arquivo nao existir: so com a credencial presente.
-  if credential_present; then
-    oauth_line="LoadCredential=oauth-client-secret:$SECRET"
-  fi
   cat >"$HEARTBEAT_SERVICE_FILE" <<EOF
 # Gerenciado pelo heartbeat-setup.sh (scripts/monitoring/alloy). Nao editar.
 [Unit]
@@ -104,12 +101,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/bash $HEARTBEAT_SCRIPT
+ExecStart=/usr/bin/python3 -I $HEARTBEAT_SCRIPT
 DynamicUser=yes
+SupplementaryGroups=alloy
 StateDirectory=$HEARTBEAT_UNIT
 StateDirectoryMode=0700
 LoadCredential=kuma-url:$HEARTBEAT_URL_FILE
-$oauth_line
 TimeoutStartSec=50
 ProtectHome=yes
 PrivateDevices=yes
@@ -165,10 +162,14 @@ if [[ $action == test ]]; then
 fi
 
 # ---------------------------------------------------------------- configurar
-staged=$dir/heartbeat.sh
-[[ -s $staged ]] || fail 'heartbeat.sh ausente ao lado de heartbeat-setup.sh.'
-bash -n "$staged" || fail 'heartbeat.sh com erro de sintaxe.'
-command -v curl >/dev/null || fail 'curl ausente; instale antes de executar.'
+staged=$dir/heartbeat.py
+[[ -s $staged ]] || fail 'heartbeat.py ausente ao lado de heartbeat-setup.sh.'
+[[ -x /usr/bin/python3 ]] || fail 'python3 ausente em /usr/bin; instale antes de executar.'
+/usr/bin/python3 -I -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' "$staged" ||
+  fail 'heartbeat.py com erro de sintaxe.'
+# O servico le a credencial pelo grupo alloy, criado pelo pacote: sem o Alloy
+# instalado, a unidade nao inicia.
+getent group alloy >/dev/null || fail 'Grupo alloy ausente: instale o Alloy antes de configurar o heartbeat.'
 # LoadCredential= e StateDirectory com DynamicUser: systemd 247+ (Debian 11+, Ubuntu 22.04+).
 systemd_version=$(systemctl --version 2>/dev/null | awk 'NR == 1 { print $2 + 0 }')
 ((${systemd_version:-0} >= 247)) || fail "systemd ${systemd_version:-?} sem suporte (minimo 247: Debian 11+, Ubuntu 22.04+)."
@@ -189,15 +190,19 @@ else
     candidate=$(push_url "$typed")
   fi
 fi
-credential_present || warn 'Sem credencial do Alloy: o estado nao vai para o Loki, so a batida no Kuma.'
+if ! credential_present; then
+  warn 'Sem credencial do Alloy: o estado nao vai para o Loki, so a batida no Kuma.'
+elif [[ $(stat -c '%G' "$SECRET") != alloy || $(( 0$(stat -c '%a' "$SECRET") & 040 )) -eq 0 ]]; then
+  warn "Credencial sem leitura para o grupo alloy ($(stat -c '%U:%G %a' "$SECRET")): use [1] Reaplicar configuracao."
+fi
 
 # Batida de teste antes de gravar qualquer coisa (estado em pasta temporaria).
 printf '\n'
 log 'Teste: estado local, Loki e batida no Uptime Kuma...'
 probe=$(mktemp -d)
 trap 'rm -rf -- "$probe"' EXIT
-HEARTBEAT_KUMA_URL=$candidate HEARTBEAT_SECRET_FILE=$SECRET STATE_DIRECTORY=$probe \
-  bash "$staged" >/dev/null 2>&1 || true
+HEARTBEAT_KUMA_URL=$candidate STATE_DIRECTORY=$probe \
+  /usr/bin/python3 -I "$staged" >/dev/null 2>&1 || true
 [[ -s $probe/last ]] || fail 'O teste nao produziu resultado. Nada foi gravado.'
 if ! show_result "$probe/last"; then
   fail "Teste reprovado: $(kuma_hint "$(last_field "$probe/last" kuma)"). Nada foi gravado."
@@ -211,7 +216,7 @@ printf '%s\n' "$candidate" >"$tmp_url"
 chmod 0600 "$tmp_url"
 mv -f -- "$tmp_url" "$HEARTBEAT_URL_FILE"
 install -d -o root -g root -m 0755 "$HEARTBEAT_LIB"
-install -o root -g root -m 0755 "$staged" "$HEARTBEAT_SCRIPT"
+install -o root -g root -m 0644 "$staged" "$HEARTBEAT_SCRIPT"
 write_units
 systemctl enable "$HEARTBEAT_UNIT.timer" >/dev/null 2>&1
 printf '\n'

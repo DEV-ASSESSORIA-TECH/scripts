@@ -177,9 +177,10 @@ ou mais de 300 s sem enviar métricas.
 
 | | Windows | Linux |
 |---|---|---|
-| Agendamento | tarefa `\GrafanaLabs\Alloy Heartbeat`, como SYSTEM, a cada minuto e no boot | `alloy-heartbeat.timer` → `alloy-heartbeat.service`, usuário dinâmico (sem root), systemd 247+ |
+| Agendamento | tarefa `\GrafanaLabs\Alloy Heartbeat`, como SYSTEM, a cada minuto e no boot | `alloy-heartbeat.timer` → `alloy-heartbeat.service`, usuário dinâmico (sem root) no grupo `alloy`, systemd 247+ |
+| Credencial do Alloy | lida direto (SYSTEM) | lida direto pelo grupo `alloy` (`root:alloy 0640`); no Linux, o heartbeat exige o Alloy instalado |
 | URL de push | `heartbeat\kuma-url` (só SYSTEM e Administradores) | `/etc/alloy/heartbeat/kuma-url` (root, 0600), entregue por `LoadCredential=` |
-| Script | `heartbeat\heartbeat.ps1` | `/usr/local/libexec/alloy-heartbeat/heartbeat.sh` |
+| Script | `heartbeat\heartbeat.ps1` | `/usr/local/libexec/alloy-heartbeat/heartbeat.py` |
 | Última execução | `heartbeat\last.json` | `/var/lib/alloy-heartbeat/last` |
 | Logs | `heartbeat\logs\`, 14 dias | `journalctl -u alloy-heartbeat` |
 
@@ -187,5 +188,10 @@ A URL e o token OAuth2 nunca vão para log nem para a linha de comando. O
 token fica em cache (mesma proteção da credencial) até perto de expirar.
 **Desinstalar** para o agendamento e mantém a URL, para reativar em [9] sem
 colar de novo; **Limpeza completa** remove tudo. Nos dois casos, pause ou
-exclua o monitor no Kuma. No Linux, se a credencial do Alloy for criada
-depois do heartbeat, reconfigure o heartbeat para ele passar a usá-la.
+exclua o monitor no Kuma. Rotacionar a credencial não exige mexer no
+heartbeat: ele lê o arquivo a cada execução.
+
+Todas as chamadas a `auth` e `mon` (atrás da Cloudflare) usam User-Agent
+próprio (`AssessoriaTech-Alloy-*`), não o padrão do PowerShell, Python ou curl.
+Se a Cloudflare ainda desafiar clientes que não são navegador, crie uma regra
+de *skip* no WAF para `/api/push/*` e `/loki/api/v1/push`.
