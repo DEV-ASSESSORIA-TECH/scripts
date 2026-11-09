@@ -37,12 +37,14 @@ $installed = Test-AlloyInstalled
 $service = Get-AlloyService
 $uninstaller = Find-AlloyUninstaller
 $inventoryTask = Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -ErrorAction SilentlyContinue
+$heartbeatTask = Get-HeartbeatTask
 
 if ($Purge) {
     $targets = @()
     if ($installed -or $uninstaller) { $targets += 'programa Grafana Alloy' }
     elseif ($service) { $targets += 'servico Alloy' }
     if ($inventoryTask) { $targets += "tarefa agendada $InventoryTaskPath$InventoryTaskName" }
+    if ($heartbeatTask) { $targets += "tarefa agendada $HeartbeatTaskPath$HeartbeatTaskName (heartbeat)" }
     foreach ($path in @($Base, $InstallDir)) {
         if (Test-Path -LiteralPath $path) { $targets += $path }
     }
@@ -77,6 +79,13 @@ if ($Purge) {
 if ($inventoryTask) {
     Write-Log 'Removendo a tarefa agendada do inventario de VMs...'
     Unregister-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -Confirm:$false
+}
+
+# Heartbeat: a tarefa sai junto com o Alloy (desinstalacao intencional); a
+# URL fica para reativar em [9] sem colar de novo. -Purge remove tudo.
+if ($heartbeatTask) {
+    Write-Log 'Removendo a tarefa agendada do heartbeat...'
+    Unregister-ScheduledTask -TaskPath $HeartbeatTaskPath -TaskName $HeartbeatTaskName -Confirm:$false
 }
 
 if ($service) {
@@ -133,8 +142,12 @@ if ($Purge) {
     if (-not $account) { $account = "alloy-$hostName" }
     Write-Warn "A conta $account continua ativa no Authentik."
     Write-Warn 'Desative-a ou remova-a do grupo alloy-agents para revogar o acesso deste servidor.'
+    if ($heartbeatTask) { Write-Warn 'Exclua tambem o monitor Push deste host no Uptime Kuma.' }
 } else {
     Write-Ok "Alloy desinstalado de $hostName."
     Write-Log "Mantidos: $Secret, $ConfigDir, $DataDir e $BackupDir."
+    if ($heartbeatTask) {
+        Write-Warn 'Heartbeat parado: pause o monitor Push deste host no Uptime Kuma. A URL ficou gravada para reativar em [9].'
+    }
     Write-Log 'Para reinstalar sem novo setup, execute a instalacao novamente.'
 }

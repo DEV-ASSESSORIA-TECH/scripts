@@ -18,6 +18,17 @@ DATA_DIR=/var/lib/alloy
 APT_SOURCE=/etc/apt/sources.list.d/grafana.list
 APT_KEY=/etc/apt/keyrings/grafana.asc
 READY_URL=http://127.0.0.1:12345/-/ready
+# Assinatura propria nas chamadas a auth/mon (atras da Cloudflare).
+USER_AGENT=AssessoriaTech-Alloy-Installer/1.0
+# Heartbeat opcional (Uptime Kuma + Loki), ver heartbeat-setup.sh.
+HEARTBEAT_DIR=$ETC_DIR/heartbeat
+HEARTBEAT_URL_FILE=$HEARTBEAT_DIR/kuma-url
+HEARTBEAT_LIB=/usr/local/libexec/alloy-heartbeat
+HEARTBEAT_SCRIPT=$HEARTBEAT_LIB/heartbeat.py
+HEARTBEAT_STATE=/var/lib/alloy-heartbeat
+HEARTBEAT_UNIT=alloy-heartbeat
+HEARTBEAT_SERVICE_FILE=/etc/systemd/system/$HEARTBEAT_UNIT.service
+HEARTBEAT_TIMER_FILE=/etc/systemd/system/$HEARTBEAT_UNIT.timer
 # Links do diagnostico. Datasource por nome ou UID, como cadastrado no Grafana.
 GRAFANA_URL=https://mon.assessoriatech.com/grafana
 GRAFANA_DS_METRICS=Prometheus

@@ -51,7 +51,7 @@ grafana_repo_user() {
 if [[ $purge == true ]]; then
   targets=()
   [[ $package_known == true ]] && targets+=("pacote alloy (purge)")
-  for path in "$ETC_DIR" "$DATA_DIR" "$ENV_FILE" "$DROPIN_FILE"; do
+  for path in "$ETC_DIR" "$DATA_DIR" "$ENV_FILE" "$DROPIN_FILE" "$HEARTBEAT_TIMER_FILE" "$HEARTBEAT_LIB"; do
     [[ -e $path || -L $path ]] && targets+=("$path")
   done
   id alloy >/dev/null 2>&1 && targets+=("usuario/grupo alloy")
@@ -100,6 +100,20 @@ if [[ $package_known == true ]]; then
   fi
 fi
 
+# Heartbeat: o timer para junto com o Alloy (desinstalacao intencional); a URL
+# fica para reativar em [9] sem colar de novo. --purge remove tudo.
+heartbeat_was_on=false
+if heartbeat_timer_enabled; then
+  heartbeat_was_on=true
+  log 'Desativando o timer do heartbeat...'
+  systemctl disable --now "$HEARTBEAT_UNIT.timer" >/dev/null 2>&1 || true
+fi
+if [[ $purge == true && -e $HEARTBEAT_SERVICE_FILE ]]; then
+  systemctl clean --what=state "$HEARTBEAT_UNIT.service" >/dev/null 2>&1 || true
+  rm -f -- "$HEARTBEAT_SERVICE_FILE" "$HEARTBEAT_TIMER_FILE"
+  rm -rf -- "$HEARTBEAT_LIB" "$HEARTBEAT_STATE" "/var/lib/private/$HEARTBEAT_UNIT"
+fi
+
 # Drop-in criado pelo install.sh; sem a unidade, ele nao tem efeito.
 rm -f -- "$DROPIN_FILE"
 rmdir -- "$DROPIN_DIR" 2>/dev/null || true
@@ -124,8 +138,12 @@ if [[ $purge == true ]]; then
   printf '\n'
   warn "A conta ${account:-alloy-$host} continua ativa no Authentik."
   warn 'Desative-a ou remova-a do grupo alloy-agents para revogar o acesso deste servidor.'
+  if [[ $heartbeat_was_on == true ]]; then warn 'Exclua tambem o monitor Push deste host no Uptime Kuma.'; fi
 else
   ok "Alloy desinstalado de $host."
   log "Mantidos: $SECRET, $ETC_DIR/*.alloy e $ETC_DIR/backups."
   log 'Para reinstalar sem novo setup, execute a instalacao novamente.'
+  if [[ $heartbeat_was_on == true ]]; then
+    warn 'Heartbeat parado: pause o monitor Push deste host no Uptime Kuma. A URL ficou gravada para reativar em [9].'
+  fi
 fi
