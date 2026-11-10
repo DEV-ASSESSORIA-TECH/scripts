@@ -11,7 +11,9 @@ modulo Hyper-V. Gera textfile\hypervisor.prom com metricas neutras
 
   hypervisor_inventory_*        saude do proprio inventario
   hypervisor_host_*             plataforma, CPUs logicas e memoria do host
-  hypervisor_vm_info            identidade da VM e do sistema convidado
+  hypervisor_vm_info            identidade da VM e do sistema convidado (vm_key: chave
+                                canonica, minusculas e [^a-z0-9_] -> _, igual a tag vm
+                                do Uptime Kuma e ao dep_vm dos alertas)
   hypervisor_vm_state           estado atual (one-hot: running, off, saved...)
   hypervisor_vm_*               uptime, vCPU, memoria, checkpoints, heartbeat
   hypervisor_vm_disk_*          discos virtuais (liga VHDX -> VM)
@@ -309,6 +311,7 @@ function Invoke-Inventory {
 
         $info = [ordered]@{
             vm           = $name
+            vm_key       = ($name.ToLowerInvariant() -replace '[^a-z0-9_]', '_')
             vm_id        = $id
             platform     = $Platform
             generation   = [string]$vm.Generation
