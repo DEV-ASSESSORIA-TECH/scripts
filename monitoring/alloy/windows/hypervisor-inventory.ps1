@@ -6,7 +6,7 @@ Inventario das VMs do hypervisor (Hyper-V) para o textfile collector do Alloy.
 .DESCRIPTION
 Executado a cada minuto, como SYSTEM, pela tarefa agendada
 "\GrafanaLabs\Alloy Hypervisor Inventory", criada pelo install.ps1 junto com o
-modulo Hyper-V. Gera textfile\hypervisor.prom com metricas neutras
+modulo Hyper-V. Gera textfile\hypervisor\hypervisor.prom com metricas neutras
 (hypervisor_*), lidas pelo Alloy no job integrations/hypervisor:
 
   hypervisor_inventory_*        saude do proprio inventario
@@ -33,7 +33,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $Started = Get-Date
-$OutputDir = Join-Path $Root 'textfile'
+$OutputDir = Join-Path $Root 'textfile\hypervisor'
 $StateDir = Join-Path $Root 'data\hypervisor'
 $LogDir = Join-Path $Root 'logs'
 $OutFile = Join-Path $OutputDir 'hypervisor.prom'

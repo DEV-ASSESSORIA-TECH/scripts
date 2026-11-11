@@ -15,11 +15,17 @@ $Registry    = 'HKLM:\SOFTWARE\GrafanaLabs\Alloy'
 $ServiceName = 'Alloy'
 $ReadyUrl    = 'http://127.0.0.1:12345/-/ready'
 $HyperVFile  = Join-Path $ConfigDir 'hyperv.alloy'
+$SqlAnywhereFile = Join-Path $ConfigDir 'sqlanywhere.alloy'
 # Inventario de VMs do modulo Hyper-V (ver install.ps1).
 $LogDir            = Join-Path $Base 'logs'
-$InventoryOutput   = Join-Path $Base 'textfile\hypervisor.prom'
+$InventoryOutput   = Join-Path $Base 'textfile\hypervisor\hypervisor.prom'
 $InventoryTaskPath = '\GrafanaLabs\'
 $InventoryTaskName = 'Alloy Hypervisor Inventory'
+# Coletor do modulo SQL Anywhere (ver install.ps1).
+$SqlState          = Join-Path $DataDir 'sqlanywhere'
+$SqlOutput         = Join-Path $Base 'textfile\sqlanywhere\sqlanywhere.prom'
+$SqlTaskPath       = '\GrafanaLabs\'
+$SqlTaskName       = 'Alloy SQL Anywhere'
 # Heartbeat opcional (Uptime Kuma + Loki), ver heartbeat-setup.ps1.
 $HeartbeatDir      = Join-Path $Base 'heartbeat'
 $HeartbeatUrlFile  = Join-Path $HeartbeatDir 'kuma-url'

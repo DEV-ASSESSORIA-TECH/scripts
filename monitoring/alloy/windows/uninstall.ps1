@@ -37,13 +37,17 @@ $installed = Test-AlloyInstalled
 $service = Get-AlloyService
 $uninstaller = Find-AlloyUninstaller
 $inventoryTask = Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -ErrorAction SilentlyContinue
+$sqlTask = Get-ScheduledTask -TaskPath $SqlTaskPath -TaskName $SqlTaskName -ErrorAction SilentlyContinue
 $heartbeatTask = Get-HeartbeatTask
+$sqlTask = Get-ScheduledTask -TaskPath '\GrafanaLabs\' -TaskName 'Alloy SQL Anywhere' -ErrorAction SilentlyContinue
 
 if ($Purge) {
     $targets = @()
     if ($installed -or $uninstaller) { $targets += 'programa Grafana Alloy' }
     elseif ($service) { $targets += 'servico Alloy' }
+    if ($sqlTask) { $targets += 'tarefa agendada SQL Anywhere' }
     if ($inventoryTask) { $targets += "tarefa agendada $InventoryTaskPath$InventoryTaskName" }
+    if ($sqlTask) { $targets += "tarefa agendada $SqlTaskPath$SqlTaskName" }
     if ($heartbeatTask) { $targets += "tarefa agendada $HeartbeatTaskPath$HeartbeatTaskName (heartbeat)" }
     foreach ($path in @($Base, $InstallDir)) {
         if (Test-Path -LiteralPath $path) { $targets += $path }
@@ -74,11 +78,21 @@ if ($Purge) {
     }
 }
 
-# Sem o Alloy, a tarefa do inventario nao tem quem leia a saida. Os arquivos
-# ficam (exceto no -Purge); a reinstalacao registra a tarefa de novo.
+# Sem o Alloy, as tarefas dos modulos nao tem quem leia a saida. Os arquivos
+# (inclusive a configuracao do SQL Anywhere) ficam, exceto no -Purge; a
+# reinstalacao registra as tarefas de novo.
 if ($inventoryTask) {
     Write-Log 'Removendo a tarefa agendada do inventario de VMs...'
     Unregister-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -Confirm:$false
+}
+if ($sqlTask) {
+    Write-Log 'Removendo a tarefa agendada do coletor SQL Anywhere...'
+    Unregister-ScheduledTask -TaskPath $SqlTaskPath -TaskName $SqlTaskName -Confirm:$false
+}
+
+if ($sqlTask) {
+    Write-Log 'Removendo a tarefa agendada SQL Anywhere...'
+    Unregister-ScheduledTask -TaskPath '\GrafanaLabs\' -TaskName 'Alloy SQL Anywhere' -Confirm:$false
 }
 
 # Heartbeat: a tarefa sai junto com o Alloy (desinstalacao intencional); a
