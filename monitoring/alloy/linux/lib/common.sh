@@ -18,6 +18,9 @@ DATA_DIR=/var/lib/alloy
 APT_SOURCE=/etc/apt/sources.list.d/grafana.list
 APT_KEY=/etc/apt/keyrings/grafana.asc
 READY_URL=http://127.0.0.1:12345/-/ready
+# Comando alloyctl (mesmos valores do alloy.sh, que roda antes desta lib).
+ALLOYCTL_DIR=/opt/alloyctl
+ALLOYCTL_BIN=/usr/local/bin/alloyctl
 # Assinatura propria nas chamadas a auth/mon (atras da Cloudflare).
 USER_AGENT=AssessoriaTech-Alloy-Installer/1.0
 # Heartbeat opcional (Uptime Kuma + Loki), ver heartbeat-setup.sh.

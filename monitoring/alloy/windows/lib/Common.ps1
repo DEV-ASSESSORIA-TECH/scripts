@@ -14,6 +14,8 @@ $Exe         = Join-Path $InstallDir 'alloy-windows-amd64.exe'
 $Registry    = 'HKLM:\SOFTWARE\GrafanaLabs\Alloy'
 $ServiceName = 'Alloy'
 $ReadyUrl    = 'http://127.0.0.1:12345/-/ready'
+# Comando alloyctl (mesmo valor do alloy.ps1, que roda antes desta lib).
+$AlloyCtlDir = Join-Path $env:ProgramFiles 'AssessoriaTech\alloyctl'
 $HyperVFile  = Join-Path $ConfigDir 'hyperv.alloy'
 $SqlAnywhereFile = Join-Path $ConfigDir 'sqlanywhere.alloy'
 # Inventario de VMs do modulo Hyper-V (ver install.ps1).

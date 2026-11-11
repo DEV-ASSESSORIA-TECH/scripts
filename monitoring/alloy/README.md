@@ -3,8 +3,9 @@
 Instalação e gestão do agente [Grafana Alloy](https://grafana.com/docs/alloy/latest/),
 que envia métricas e logs de cada servidor ao monitoramento central.
 
-Um único comando abre a ferramenta. Na primeira execução, ele segue direto o
-fluxo de credencial e depois a instalação. Nas seguintes, abre um menu:
+Um único comando abre a ferramenta: **`alloyctl`**, instalado no servidor na
+primeira execução do comando abaixo. Na primeira vez, ele segue direto o fluxo
+de credencial e depois a instalação. Nas seguintes, abre um menu:
 
 ```
  ==============================================================
@@ -59,13 +60,46 @@ try {
 }
 ```
 
-O ponto de entrada baixa, a partir do mesmo ref, só os arquivos de que cada
-operação precisa. Executado a partir de um clone, usa os arquivos locais.
+Depois da primeira execução, basta `alloyctl` (ou `alloyctl <comando>`). O
+comando acima continua valendo: com o `alloyctl` instalado, ele o atualiza e
+abre o menu.
+
+## alloyctl
+
+| | Linux | Windows |
+|-|-------|---------|
+| Ferramenta | `/opt/alloyctl/` | `C:\Program Files\AssessoriaTech\alloyctl\` |
+| Comando | `/usr/local/bin/alloyctl` (link) | `alloyctl.cmd`, pasta no PATH da máquina (vale em terminais novos) |
+| Sem administrador | pede `sudo` | pede elevação (UAC) e continua em uma nova janela |
+
+- **Atualização a cada execução**: uma consulta à API do GitHub descobre o
+  commit atual da branch acompanhada (padrão `main`). Se mudou, baixa o núcleo
+  (ponto de entrada + `lib/`) daquele commit, troca a pasta inteira e reinicia
+  com a versão nova. Sem acesso ao GitHub, avisa e segue com a versão
+  instalada. `--no-update` (`-NoUpdate`) pula a verificação; `alloyctl update`
+  só atualiza e mostra a versão.
+- **Arquivos sob demanda**: instalação, credencial, módulos e heartbeat são
+  baixados na primeira vez que a operação precisa deles, **do mesmo commit** do
+  núcleo, e ficam na pasta até a próxima versão.
+- **Branch acompanhada**: `--ref <branch|tag|commit>` (`-Ref` no Windows) troca
+  e fica gravada (arquivo `ref` na pasta). O comando do README volta para
+  `main`, salvo com `--ref`.
+- **Configuração do Alloy não muda sozinha**: a atualização mexe só no
+  `alloyctl`. Aplicar uma configuração nova continua sendo **[1] Reaplicar
+  configuração**.
+- **Remoção**: a desinstalação mantém o `alloyctl`; a limpeza completa remove
+  a pasta, o comando e (Windows) a entrada do PATH.
+
+Executado a partir de um clone do repositório, o ponto de entrada usa os
+arquivos locais e não instala nem atualiza o `alloyctl`.
 
 ## Comandos diretos (automação)
 
-| Linux (`alloy.sh`) | Windows (`alloy.ps1`) | Ação |
-|--------------------|-----------------------|------|
+Os mesmos comandos valem para `alloyctl` e para o ponto de entrada baixado
+(`alloy.sh` / `alloy.ps1`).
+
+| Linux | Windows | Ação |
+|-------|---------|------|
 | `install [--modules docker\|none] [--upgrade]` | `install [-Modules hyperv,sqlanywhere\|none] [-Upgrade]` | credencial (se ausente) + instalação |
 | `credentials` | `credentials` | só o setup da credencial |
 | `check` | `check` | testa a credencial gravada, sem alterar nada |
@@ -73,19 +107,21 @@ operação precisa. Executado a partir de um clone, usa os arquivos locais.
 | `modules docker\|none` | `modules hyperv,sqlanywhere\|none` | define os módulos opcionais (os não listados são desativados) |
 | `upgrade` | `upgrade` | atualiza o Alloy |
 | `status` | `status` | diagnóstico |
-| `uninstall [--yes]` | `uninstall [-Yes]` | remove o Alloy, mantendo credencial e configuração |
-| `purge [--yes]` | `purge [-Yes]` | limpeza completa |
+| `uninstall [--yes]` | `uninstall [-Yes]` | remove o Alloy, mantendo credencial, configuração e o `alloyctl` |
+| `purge [--yes]` | `purge [-Yes]` | limpeza completa (inclui o `alloyctl`) |
 | `heartbeat [--url URL]` | `heartbeat [-Url URL]` | configura o heartbeat (Uptime Kuma + Loki) |
 | `heartbeat-test` | `heartbeat-test` | executa o heartbeat agora e mostra o resultado |
 | `heartbeat-remove [--yes]` | `heartbeat-remove [-Yes]` | remove o heartbeat |
+| `update` | `update` | atualiza só o `alloyctl` e mostra a versão |
 
-`--ref <branch|tag|commit>` (`-Ref` no Windows) fixa a versão do repositório.
+`--ref <branch|tag|commit>` (`-Ref`) troca a branch acompanhada;
+`--no-update` (`-NoUpdate`) não atualiza antes de executar.
 
 ## Arquivos
 
 | Arquivo | Função |
 |---------|--------|
-| `alloy.sh` / `alloy.ps1` | ponto de entrada: menu e comandos |
+| `alloy.sh` / `alloy.ps1` | ponto de entrada: instala/atualiza o `alloyctl`, menu e comandos |
 | `lib/common.*` | constantes, saída e download |
 | `lib/state.*` | estado do servidor, cabeçalho e diagnóstico |
 | `lib/ui.*` | interface do terminal: telas, marcadores, menu e teclas |

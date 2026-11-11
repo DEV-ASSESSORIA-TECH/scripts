@@ -51,7 +51,8 @@ grafana_repo_user() {
 if [[ $purge == true ]]; then
   targets=()
   [[ $package_known == true ]] && targets+=("pacote alloy (purge)")
-  for path in "$ETC_DIR" "$DATA_DIR" "$ENV_FILE" "$DROPIN_FILE" "$HEARTBEAT_TIMER_FILE" "$HEARTBEAT_LIB"; do
+  for path in "$ETC_DIR" "$DATA_DIR" "$ENV_FILE" "$DROPIN_FILE" "$HEARTBEAT_TIMER_FILE" "$HEARTBEAT_LIB" \
+              "$ALLOYCTL_BIN" "$ALLOYCTL_DIR"; do
     [[ -e $path || -L $path ]] && targets+=("$path")
   done
   id alloy >/dev/null 2>&1 && targets+=("usuario/grupo alloy")
@@ -124,6 +125,10 @@ if [[ $purge == true ]]; then
   log 'Removendo credencial, configuracao, backups e dados...'
   rm -rf -- "$ETC_DIR" "$DATA_DIR"
   rm -f -- "$ENV_FILE"
+  # O bash le o script em execucao pelo descritor ja aberto: remover o
+  # diretorio do alloyctl agora e seguro.
+  rm -f -- "$ALLOYCTL_BIN"
+  rm -rf -- "$ALLOYCTL_DIR"
   if id alloy >/dev/null 2>&1; then
     userdel alloy 2>/dev/null || warn 'Nao foi possivel remover o usuario alloy.'
   fi

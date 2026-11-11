@@ -297,6 +297,11 @@ function Show-AlloyDiagnostics {
     } else {
         Write-UiRow 'Estado' 'off' 'nao instalado'
     }
+    switch ($env:ALLOYCTL_MODE) {
+        'installed' { Write-UiRow 'alloyctl' 'none' "$($env:ALLOYCTL_REF) @ $($env:ALLOY_REF.Substring(0, 7)) ($AlloyCtlDir)" }
+        'local' { Write-UiRow 'alloyctl' 'none' "clone local (ref $($env:ALLOY_REF))" }
+        default { Write-UiRow 'alloyctl' 'warn' "nao instalado (arquivos temporarios, ref $($env:ALLOY_REF))" }
+    }
     $files = @(Get-ChildItem -LiteralPath $ConfigDir -Filter '*.alloy' -File -ErrorAction SilentlyContinue).Count
     Write-UiRow 'Config' 'none' "$ConfigDir ($files arquivo(s) .alloy)"
     if (Test-CredentialPresent) {

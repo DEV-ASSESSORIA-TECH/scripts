@@ -1,14 +1,20 @@
 #!/usr/bin/env bash
 # Ponto de entrada unico do Grafana Alloy no Linux (Debian/Ubuntu).
 # Sem comando: primeira instalacao guiada ou menu interativo.
-# Baixa sob demanda, do mesmo ref, apenas os arquivos de cada operacao.
+#
+# Executado a partir do download (comando do README), instala o comando
+# alloyctl (/opt/alloyctl + /usr/local/bin/alloyctl) e segue por ele. O
+# alloyctl se atualiza a cada execucao pela branch acompanhada e baixa sob
+# demanda, presos ao mesmo commit, apenas os arquivos de cada operacao.
 set -euo pipefail
 
 usage() {
   cat <<'EOF'
-Uso: sudo bash alloy.sh [comando] [opcoes] [--ref REF]
+Uso: alloyctl [comando] [opcoes]
+     sudo bash alloy.sh [comando] [opcoes]   (instala o alloyctl e segue por ele)
 
 Sem comando, abre o menu (ou a primeira instalacao guiada).
+Sem root, pede elevacao com sudo.
 
 Comandos:
   install [--modules docker|none] [--upgrade]
@@ -21,67 +27,187 @@ Comandos:
   upgrade      atualiza o pacote Alloy
   status       diagnostico (servico, logs, conectividade, consultas)
   uninstall [--yes]
-               remove o Alloy, mantendo credencial e configuracao
+               remove o Alloy, mantendo credencial, configuracao e o alloyctl
   purge [--yes]
-               limpeza completa (inclui a credencial)
+               limpeza completa (inclui a credencial e o alloyctl)
   heartbeat [--url URL]
                configura o heartbeat (Uptime Kuma Push + Loki)
   heartbeat-test
                executa o heartbeat agora e mostra o resultado
   heartbeat-remove [--yes]
                remove o heartbeat
+  update       atualiza so o alloyctl e mostra a versao
   menu         abre o menu mesmo na primeira execucao
 
 Opcoes globais:
-  --ref REF    branch, tag ou commit do repositorio (padrao: main)
+  --ref REF    branch, tag ou commit acompanhado pelo alloyctl (padrao: main);
+               fica gravado para as proximas execucoes
+  --no-update  nao atualiza o alloyctl antes de executar
   -h, --help   esta ajuda
 EOF
 }
 
 # ---------------------------------------------------------------- argumentos
+pass_args=()   # argumentos sem --ref/--no-update, repassados na reexecucao
 command=''
 cmd_args=()
 ref_arg=''
+no_update=false
 while (($#)); do
   case "$1" in
     -h|--help) usage; exit 0 ;;
     --ref) (($# >= 2)) || { printf 'Falta valor para --ref.\n' >&2; exit 1; }; ref_arg=$2; shift 2; continue ;;
-    --ref=*) ref_arg=${1#*=} ;;
-    --url) (($# >= 2)) || { printf 'Falta valor para --url.\n' >&2; exit 1; }; cmd_args+=(--url "$2"); shift 2; continue ;;
+    --ref=*) ref_arg=${1#*=}; shift; continue ;;
+    --no-update) no_update=true; shift; continue ;;
+    --url) (($# >= 2)) || { printf 'Falta valor para --url.\n' >&2; exit 1; }
+           cmd_args+=(--url "$2"); pass_args+=(--url "$2"); shift 2; continue ;;
     -*) cmd_args+=("$1") ;;
     *) if [[ -z $command ]]; then command=$1; else cmd_args+=("$1"); fi ;;
   esac
+  pass_args+=("$1")
   shift
 done
-[[ -n $ref_arg ]] && export ALLOY_REF=$ref_arg
-export ALLOY_REF=${ALLOY_REF:-main}
+[[ -z $ref_arg && -n ${ALLOY_REF:-} ]] && ref_arg=$ALLOY_REF
 
+# Sem root: reexecuta com sudo (o caminho real, nao o link do alloyctl).
+self=$(readlink -f -- "${BASH_SOURCE[0]}")
 if [[ $EUID -ne 0 ]]; then
-  printf '[Alloy] ERRO: execute com sudo.\n' >&2
-  exit 1
+  command -v sudo >/dev/null 2>&1 || { printf '[Alloy] ERRO: execute como root.\n' >&2; exit 1; }
+  elevated=("${pass_args[@]}")
+  [[ -n $ref_arg ]] && elevated+=(--ref "$ref_arg")
+  [[ $no_update == true ]] && elevated+=(--no-update)
+  exec sudo -- bash "$self" "${elevated[@]}"
 fi
 
-# ---------------------------------------------------------------- bootstrap
-# Clone do repositorio: usa os arquivos locais. Caso contrario (arquivo
-# baixado sozinho), trabalha numa pasta temporaria propria.
-self_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-if [[ -f $self_dir/install.sh && -f $self_dir/lib/common.sh ]]; then
-  export ALLOY_LOCAL=1
-  src=$self_dir
+# ---------------------------------------------------------------- alloyctl
+TOOL_DIR=/opt/alloyctl
+TOOL_BIN=/usr/local/bin/alloyctl
+TOOL_REPO=DEV-ASSESSORIA-TECH/scripts
+TOOL_RAW=https://raw.githubusercontent.com/$TOOL_REPO
+TOOL_API=https://api.github.com/repos/$TOOL_REPO/commits
+TOOL_REMOTE_DIR=monitoring/alloy/linux
+TOOL_UA=AssessoriaTech-Alloy-Installer/1.0
+# Nucleo baixado a cada versao; o resto vem sob demanda (fetch).
+TOOL_CORE=(alloy.sh lib/common.sh lib/state.sh lib/ui.sh)
+
+tool_log() { printf '[alloyctl] %s\n' "$*"; }
+tool_warn() { printf '[alloyctl] AVISO: %s\n' "$*" >&2; }
+valid_ref() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && $1 != *..* ]]; }
+
+# Commit atual de uma branch/tag (uma requisicao a API do GitHub).
+resolve_sha() {
+  local sha
+  sha=$(curl -fsS --proto '=https' --connect-timeout 10 --max-time 20 -A "$TOOL_UA" \
+    -H 'Accept: application/vnd.github.sha' "$TOOL_API/$1" 2>/dev/null) || return 1
+  [[ $sha =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s' "$sha"
+}
+
+# install_tool REF SHA: baixa o nucleo do commit, troca o diretorio inteiro
+# (descarta os arquivos sob demanda da versao anterior) e cria o comando.
+# O bash continua lendo o script em execucao pelo descritor ja aberto.
+install_tool() {
+  local ref=$1 sha=$2 stage old='' name args=()
+  mkdir -p -- "$(dirname -- "$TOOL_DIR")"
+  stage=$(mktemp -d "$TOOL_DIR.new.XXXXXX") || return 1
+  for name in "${TOOL_CORE[@]}"; do
+    mkdir -p -- "$stage/$(dirname -- "$name")"
+    args+=(-o "$stage/$name" "$TOOL_RAW/$sha/$TOOL_REMOTE_DIR/$name")
+  done
+  if ! curl -fsSL --proto '=https' --fail-early --connect-timeout 10 --retry 2 -A "$TOOL_UA" "${args[@]}"; then
+    rm -rf -- "$stage"; return 1
+  fi
+  for name in "${TOOL_CORE[@]}"; do
+    [[ -s $stage/$name ]] || { rm -rf -- "$stage"; return 1; }
+  done
+  bash -n "$stage/alloy.sh" || { rm -rf -- "$stage"; return 1; }
+  printf '%s\n' "$ref" >"$stage/ref"
+  printf '%s\n' "$sha" >"$stage/version"
+  chown -R root:root -- "$stage"
+  find "$stage" -type d -exec chmod 0755 {} +
+  find "$stage" -type f -exec chmod 0644 {} +
+  chmod 0755 "$stage/alloy.sh"
+  if [[ -e $TOOL_DIR ]]; then
+    old=$TOOL_DIR.old.$$
+    mv -- "$TOOL_DIR" "$old"
+  fi
+  mv -- "$stage" "$TOOL_DIR"
+  if [[ -n $old ]]; then rm -rf -- "$old"; fi
+  ln -sfn "$TOOL_DIR/alloy.sh" "$TOOL_BIN"
+}
+
+# Reexecuta a versao instalada, sem nova verificacao.
+exec_tool() { exec bash "$TOOL_DIR/alloy.sh" "${pass_args[@]}" --no-update; }
+
+self_dir=$(dirname -- "$self")
+if [[ $self_dir == "$TOOL_DIR" ]]; then
+  mode=installed
+elif [[ -f $self_dir/install.sh && -f $self_dir/lib/common.sh ]]; then
+  mode=local   # clone do repositorio: usa os arquivos locais
 else
-  export ALLOY_LOCAL=0
-  src=$(mktemp -d)
-  trap 'rm -rf -- "$src"' EXIT
-  [[ $ALLOY_REF =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && $ALLOY_REF != *..* ]] ||
-    { printf '[Alloy] ERRO: referencia invalida: %s\n' "$ALLOY_REF" >&2; exit 1; }
-  raw="https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ALLOY_REF/monitoring/alloy/linux"
-  mkdir -p -- "$src/lib"
-  curl -fsSL --proto '=https' --fail-early --connect-timeout 10 --retry 2 \
-    -o "$src/lib/common.sh" "$raw/lib/common.sh" \
-    -o "$src/lib/state.sh" "$raw/lib/state.sh" \
-    -o "$src/lib/ui.sh" "$raw/lib/ui.sh" ||
-    { printf '[Alloy] ERRO: falha ao baixar as bibliotecas (ref %s).\n' "$ALLOY_REF" >&2; exit 1; }
+  mode=bootstrap
 fi
+if [[ -n $ref_arg ]] && ! valid_ref "$ref_arg"; then
+  printf '[Alloy] ERRO: referencia invalida: %s\n' "$ref_arg" >&2; exit 1
+fi
+
+case "$mode" in
+  bootstrap)
+    # Comando do README: instala (ou atualiza) o alloyctl e segue por ele.
+    ref=${ref_arg:-main}
+    first=true; [[ -x $TOOL_DIR/alloy.sh ]] && first=false
+    if sha=$(resolve_sha "$ref") && install_tool "$ref" "$sha"; then
+      if [[ $first == true ]]; then
+        tool_log "comando instalado: $TOOL_BIN (acompanha $ref). Daqui em diante, use: alloyctl"
+      fi
+      exec_tool
+    fi
+    tool_warn 'nao foi possivel instalar o alloyctl; seguindo com arquivos temporarios.'
+    ;;
+  installed)
+    tracked=$(cat -- "$TOOL_DIR/ref" 2>/dev/null) || tracked=main
+    valid_ref "$tracked" || tracked=main
+    version=$(cat -- "$TOOL_DIR/version" 2>/dev/null) || version=''
+    # --ref diferente troca a branch acompanhada; so vale se a atualizacao der certo.
+    wanted=$tracked force=false
+    if [[ -n $ref_arg && $ref_arg != "$tracked" ]]; then wanted=$ref_arg; force=true; fi
+    if [[ $no_update != true || $force == true ]]; then
+      if sha=$(resolve_sha "$wanted"); then
+        if [[ $sha != "$version" || $force == true ]]; then
+          if install_tool "$wanted" "$sha"; then
+            tool_log "atualizado: ${version:0:7} -> ${sha:0:7} ($wanted)"
+            exec_tool
+          fi
+          tool_warn "falha ao atualizar; usando a versao instalada ($tracked @ ${version:0:7})."
+        fi
+      else
+        tool_warn "sem atualizacao (GitHub inacessivel ou ref '$wanted' inexistente); usando $tracked @ ${version:0:7}."
+      fi
+    fi
+    ;;
+esac
+
+case "$mode" in
+  installed)
+    [[ $version =~ ^[0-9a-f]{40}$ ]] || { printf '[Alloy] ERRO: %s/version invalido; rode o comando do README.\n' "$TOOL_DIR" >&2; exit 1; }
+    # Tudo o que for baixado daqui em diante vem do mesmo commit.
+    export ALLOY_REF=$version ALLOY_LOCAL=0 ALLOYCTL_REF=$tracked
+    src=$TOOL_DIR ;;
+  local)
+    export ALLOY_REF=${ref_arg:-main} ALLOY_LOCAL=1
+    src=$self_dir ;;
+  bootstrap)
+    export ALLOY_REF=${ref_arg:-main} ALLOY_LOCAL=0
+    src=$(mktemp -d)
+    trap 'rm -rf -- "$src"' EXIT
+    mkdir -p -- "$src/lib"
+    curl -fsSL --proto '=https' --fail-early --connect-timeout 10 --retry 2 \
+      -o "$src/lib/common.sh" "$TOOL_RAW/$ALLOY_REF/$TOOL_REMOTE_DIR/lib/common.sh" \
+      -o "$src/lib/state.sh" "$TOOL_RAW/$ALLOY_REF/$TOOL_REMOTE_DIR/lib/state.sh" \
+      -o "$src/lib/ui.sh" "$TOOL_RAW/$ALLOY_REF/$TOOL_REMOTE_DIR/lib/ui.sh" ||
+      { printf '[Alloy] ERRO: falha ao baixar as bibliotecas (ref %s).\n' "$ALLOY_REF" >&2; exit 1; } ;;
+esac
+export ALLOYCTL_MODE=$mode
 # shellcheck source=lib/common.sh
 source "$src/lib/common.sh"
 # shellcheck source=lib/ui.sh
@@ -163,6 +289,31 @@ do_uninstall() {
   bash "$src/uninstall.sh" "$@"
 }
 
+# A limpeza completa remove tambem o alloyctl: nada mais a executar.
+after_purge() {
+  if [[ $ALLOYCTL_MODE == installed && ! -d $TOOL_DIR ]]; then
+    log 'alloyctl removido. Para instalar de novo, use o comando do README.'
+    exit 0
+  fi
+}
+
+do_update() {
+  if [[ $ALLOYCTL_MODE != installed ]]; then
+    warn 'alloyctl nao instalado; execute sem --no-update a partir do comando do README.'
+    return 1
+  fi
+  ok "alloyctl $ALLOYCTL_REF @ ${ALLOY_REF:0:7} ($TOOL_BIN)"
+}
+
+# Como abrir de novo: pelo alloyctl quando instalado.
+reopen_hint() {
+  if [[ $ALLOYCTL_MODE == installed ]]; then
+    printf '  Para gerenciar este servidor depois, execute: alloyctl\n'
+  else
+    printf '  Para gerenciar este servidor depois, execute o mesmo comando.\n'
+  fi
+}
+
 # Heartbeat opcional: nunca sugerido na instalacao, so pelo menu [9] ou comando.
 do_heartbeat() {
   fetch "$src" heartbeat-setup.sh heartbeat.py || return 1
@@ -184,7 +335,7 @@ first_install() {
   printf '\n'
   LAST_STATUS=ok LAST_ACTION="Primeira instalacao - concluida ($(date +%H:%M))"
   print_header
-  printf '  Para gerenciar este servidor depois, execute o mesmo comando.\n'
+  reopen_hint
 }
 
 # run_screen TITULO FUNCAO [ARGS...]: tela propria, resultado e "ultima acao".
@@ -279,7 +430,7 @@ menu() {
          fi ;;
       6) view_screen diagnose ;;
       7) run_screen 'Desinstalar' do_uninstall ;;
-      8) run_screen 'Limpeza completa' do_uninstall --purge ;;
+      8) run_screen 'Limpeza completa' do_uninstall --purge; after_purge ;;
       9) if heartbeat_configured; then
            heartbeat_menu
          else
@@ -288,7 +439,11 @@ menu() {
       0|q|Q)
         ui_clear
         print_summary
-        printf '  Para abrir o menu de novo, execute o mesmo comando.\n'
+        if [[ $ALLOYCTL_MODE == installed ]]; then
+          printf '  Para abrir o menu de novo, execute: alloyctl\n'
+        else
+          printf '  Para abrir o menu de novo, execute o mesmo comando.\n'
+        fi
         return 0 ;;
       *) ;;
     esac
@@ -313,5 +468,6 @@ case "$command" in
   heartbeat) do_heartbeat "${cmd_args[@]}" ;;
   heartbeat-test) do_heartbeat --test ;;
   heartbeat-remove) do_heartbeat --remove "${cmd_args[@]}" ;;
+  update) do_update ;;
   *) usage >&2; fail "Comando desconhecido: $command" ;;
 esac
