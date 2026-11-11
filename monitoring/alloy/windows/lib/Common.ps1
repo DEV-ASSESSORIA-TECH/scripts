@@ -18,6 +18,9 @@ $ReadyUrl    = 'http://127.0.0.1:12345/-/ready'
 $AlloyCtlDir = Join-Path $env:ProgramFiles 'AssessoriaTech\alloyctl'
 $HyperVFile  = Join-Path $ConfigDir 'hyperv.alloy'
 $SqlAnywhereFile = Join-Path $ConfigDir 'sqlanywhere.alloy'
+# Arquivo base de cada perfil (ver install.ps1 -Perfil).
+$ServerFile  = Join-Path $ConfigDir 'config.alloy'
+$DesktopFile = Join-Path $ConfigDir 'desktop.alloy'
 # Inventario de VMs do modulo Hyper-V (ver install.ps1).
 $LogDir            = Join-Path $Base 'logs'
 $InventoryOutput   = Join-Path $Base 'textfile\hypervisor\hypervisor.prom'

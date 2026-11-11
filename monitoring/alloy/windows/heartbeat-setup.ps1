@@ -24,6 +24,12 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'lib\Ui.ps1')
 . (Join-Path $PSScriptRoot 'lib\State.ps1')
 
+# Estacoes sao descartaveis e nao alertam: heartbeat so nos servidores.
+# Testar e remover continuam permitidos (heartbeat de antes da troca de perfil).
+if ((Get-AlloyPerfil) -eq 'estacao' -and -not $Test -and -not $Remove) {
+    throw 'Heartbeat nao se aplica ao perfil estacao (maquinas descartaveis, sem alertas).'
+}
+
 function Ensure-Directory([string]$Path) {
     if (Test-Path -LiteralPath $Path) {
         $item = Get-Item -LiteralPath $Path -Force

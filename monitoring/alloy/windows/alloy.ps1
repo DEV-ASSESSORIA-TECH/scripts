@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Ponto de entrada unico do Grafana Alloy no Windows Server (comando alloyctl).
+Ponto de entrada unico do Grafana Alloy no Windows, servidor ou estacao (comando alloyctl).
 
 .DESCRIPTION
 Sem comando: primeira instalacao guiada (credencial + instalacao) ou, se o
@@ -15,7 +15,7 @@ de cada operacao. Sem Administrador, pede elevacao (UAC) e abre em nova janela.
 
 Comandos:
   install      credencial (se ausente) + instalacao/reaplicacao
-               [-Modules auto|none|hyperv,sqlanywhere] [-Upgrade]
+               [-Perfil auto|servidor|estacao] [-Modules auto|none|hyperv,sqlanywhere] [-Upgrade]
   credentials  apenas o setup da credencial
   check        testa a credencial gravada (OAuth2 + Loki), sem alterar nada
   rotate       substitui a credencial e reinicia o Alloy
@@ -36,6 +36,12 @@ Comandos:
 Branch, tag ou commit acompanhado pelo alloyctl (padrao: main). Fica gravado
 para as proximas execucoes.
 
+.PARAMETER Perfil
+servidor: job integrations/windows, com alertas. estacao: maquina descartavel,
+job integrations/windows-desktop, sem alertas, sem modulos opcionais e sem
+heartbeat. auto (padrao): mantem o perfil instalado; na primeira instalacao,
+estacao em Windows de cliente (10/11) e servidor no Windows Server.
+
 .PARAMETER NoUpdate
 Nao atualiza o alloyctl antes de executar.
 
@@ -47,6 +53,9 @@ alloyctl
 
 .EXAMPLE
 alloyctl modules hyperv,sqlanywhere
+
+.EXAMPLE
+alloyctl install -Perfil estacao
 #>
 [CmdletBinding()]
 param(
@@ -58,6 +67,8 @@ param(
     # chega como um unico texto.
     [Parameter(Position = 1)]
     [string[]]$Modules = @('auto'),
+    [ValidateSet('auto', 'servidor', 'estacao')]
+    [string]$Perfil = 'auto',
     [switch]$Upgrade,
     [switch]$Yes,
     [string]$Ref,
@@ -318,22 +329,29 @@ try {
     # Os scripts filhos rodam com seus proprios controles de erro e rollback;
     # uma falha lanca excecao, tratada pelo menu ou repassada ao chamador.
 
+    # Perfil efetivo: o pedido, ou o instalado/detectado (lib\State.ps1).
+    function Resolve-Perfil([string]$Requested) {
+        if ($Requested -and $Requested -ne 'auto') { return $Requested }
+        return Get-AlloyPerfil
+    }
+    function Test-Estacao { (Get-AlloyPerfil) -eq 'estacao' }
+
     function Invoke-Credentials([hashtable]$Arguments = @{}) {
         Save-RemoteFiles $src @('setup-credentials.ps1')
         & (Join-Path $src 'setup-credentials.ps1') @Arguments
     }
 
     function Invoke-Installer([hashtable]$Arguments = @{}) {
-        Save-RemoteFiles $src @('install.ps1', 'config.alloy')
+        Save-RemoteFiles $src @('install.ps1', 'config.alloy', 'desktop.alloy')
         & (Join-Path $src 'install.ps1') @Arguments
     }
 
     function Invoke-Install([hashtable]$Arguments = @{}) {
         if (-not (Test-CredentialPresent)) {
             # Os tres arquivos com o mesmo cliente HTTP, antes da etapa 1.
-            Save-RemoteFiles $src @('setup-credentials.ps1', 'install.ps1', 'config.alloy')
+            Save-RemoteFiles $src @('setup-credentials.ps1', 'install.ps1', 'config.alloy', 'desktop.alloy')
             Write-UiSection 'ETAPA 1/2 - CREDENCIAL'
-            Invoke-Credentials
+            Invoke-Credentials @{ Perfil = (Resolve-Perfil $Arguments.Perfil) }
             Write-UiSection 'ETAPA 2/2 - INSTALACAO'
         }
         Invoke-Installer $Arguments
@@ -341,7 +359,7 @@ try {
 
     function Invoke-SetupCredentials {
         if (Test-CredentialPresent) { throw 'Credencial ja existe. Use "rotate" para substituir.' }
-        Invoke-Credentials
+        Invoke-Credentials @{ Perfil = (Resolve-Perfil $Perfil) }
     }
 
     function Invoke-Check {
@@ -351,7 +369,7 @@ try {
 
     function Invoke-Rotate {
         if (-not (Test-CredentialPresent)) { throw 'Nenhuma credencial gravada; use o setup de credencial.' }
-        Invoke-Credentials @{ Rotate = $true }
+        Invoke-Credentials @{ Rotate = $true; Perfil = (Get-AlloyPerfil) }
         if (Test-AlloyRunning) {
             Write-Log 'Reiniciando o Alloy para carregar a nova credencial...'
             Restart-Service -Name $ServiceName
@@ -366,6 +384,9 @@ try {
             throw 'Use: modules hyperv|sqlanywhere|none (varios separados por virgula).'
         }
         if (-not (Test-CredentialPresent)) { throw 'Credencial ausente; execute a instalacao primeiro.' }
+        if ((Test-Estacao) -and @($Selection | Where-Object { $_ -ne 'none' }).Count -gt 0) {
+            throw 'Modulos opcionais nao se aplicam ao perfil estacao.'
+        }
         Invoke-Installer @{ Modules = $Selection }
     }
 
@@ -425,21 +446,34 @@ try {
     function Invoke-FirstInstall {
         Clear-UiScreen
         Write-UiBanner (Get-AlloyHostName)
-        Write-Host '  Primeira instalacao neste servidor.'
+        $chosen = Resolve-Perfil $Perfil
+        Write-Host '  Primeira instalacao nesta maquina.'
         Write-Host ''
+        if ($Perfil -eq 'auto') {
+            Write-UiText '  Perfil detectado: ' 'White' -NoNewline
+            Write-Host $chosen
+            $answer = (Read-Host '  Perfil [S]ervidor ou [E]stacao (Enter mantem o detectado)').Trim()
+            if ($answer -match '^(s|servidor)$') { $chosen = 'servidor' }
+            elseif ($answer -match '^(e|estacao)$') { $chosen = 'estacao' }
+        }
+        if ($chosen -eq 'estacao') {
+            Write-Host '  Estacao: maquina descartavel, sem alertas, fora dos dashboards de servidores.'
+        }
+        Write-Host ''
+        $account = if ($chosen -eq 'estacao') { 'conta compartilhada alloy-estacoes' } else { 'conta alloy-<hostname>' }
         Write-UiText '  [1/2] Credencial' 'White' -NoNewline
-        Write-Host '   conta alloy-<hostname> + senha de aplicativo,'
+        Write-Host "   $account + senha de aplicativo,"
         Write-Host '                     validada (OAuth2 + Loki) antes de gravar'
         Write-UiText '  [2/2] Instalacao' 'White' -NoNewline
         Write-Host '   Alloy + configuracao, com validacao e rollback'
         Write-Host ''
         if (-not (Confirm-Choice '  Continuar?')) { Write-Log 'Cancelado; nada foi alterado.'; return }
-        Invoke-Install
+        Invoke-Install @{ Perfil = $chosen }
         Write-Host ''
         $script:LastStatus = 'ok'
         $script:LastAction = "Primeira instalacao - concluida ($(Get-Date -Format 'HH:mm'))"
         Show-AlloyHeader
-        Write-Host "  Para gerenciar este servidor depois, $(Get-ReopenHint)"
+        Write-Host "  Para gerenciar esta maquina depois, $(Get-ReopenHint)"
     }
 
     # Tela propria para a acao, resultado e "ultima acao" no cabecalho.
@@ -525,25 +559,36 @@ try {
             $label1 = if ($installed) { 'Reaplicar configuracao' } else { 'Instalar Alloy' }
             $label5 = if (Test-CredentialPresent) { 'Rotacionar' } else { 'Configurar' }
             $color1 = if ($default) { 'Green' } else { '' }
+            # Estacao: modulos opcionais e heartbeat so para remover o que ja existir.
+            $estacao = Test-Estacao
+            $modulesActive = (Test-HyperVModule) -or (Test-SqlAnywhereModule)
+            $label2 = 'Modulos opcionais'; $color2 = ''
+            if ($estacao -and -not $modulesActive) { $label2 = 'Modulos (so servidor)'; $color2 = 'DarkGray' }
 
             Clear-UiScreen
             Show-AlloyHeader
             Write-UiColumns 'INSTALACAO' 'White' 'CREDENCIAL' 'White'
             Write-UiColumns " [1] $label1" $color1 ' [4] Testar' ''
-            Write-UiColumns ' [2] Modulos opcionais' '' " [5] $label5" ''
+            Write-UiColumns " [2] $label2" $color2 " [5] $label5" ''
             Write-UiColumns ' [3] Atualizar Alloy' '' '' ''
             Write-Host ''
             Write-UiColumns 'DIAGNOSTICO' 'White' 'REMOCAO' 'White'
             $label9 = if (Test-HeartbeatConfigured) { 'Heartbeat' } else { 'Configurar heartbeat' }
+            $color9 = ''
+            if ($estacao -and -not (Test-HeartbeatConfigured)) { $label9 = 'Heartbeat (so servidor)'; $color9 = 'DarkGray' }
             Write-UiColumns ' [6] Ver diagnostico' '' ' [7] Desinstalar' 'Red'
-            Write-UiColumns " [9] $label9" '' ' [8] Limpeza completa' 'Red'
+            Write-UiColumns " [9] $label9" $color9 ' [8] Limpeza completa' 'Red'
             Write-UiRule '-'
             $prompt = if ($default) { "Tecle a opcao (Enter = $default, 0 sai)" } else { 'Tecle a opcao (0 sai)' }
             $choice = Read-UiKey $prompt
             if ($choice -eq '') { $choice = $default }
             switch ($choice) {
                 '1' { Invoke-Screen $label1 { Invoke-Install } }
-                '2' { Show-ModulesMenu }
+                '2' {
+                    if ($estacao -and -not $modulesActive) {
+                        Invoke-Screen 'Modulos opcionais' { throw 'Modulos opcionais nao se aplicam ao perfil estacao.' }
+                    } else { Show-ModulesMenu }
+                }
                 '3' { Invoke-Screen 'Atualizar Alloy' { Invoke-Upgrade } }
                 '4' { Invoke-Screen 'Testar credencial' { Invoke-Check } }
                 '5' {
@@ -586,7 +631,7 @@ try {
         }
         'menu' { Assert-Interactive; Show-Menu }
         'install' {
-            $installArgs = @{ Modules = $Modules }
+            $installArgs = @{ Modules = $Modules; Perfil = $Perfil }
             if ($Upgrade) { $installArgs.Upgrade = $true }
             Invoke-Install $installArgs
         }

@@ -1,7 +1,13 @@
 #Requires -RunAsAdministrator
 #Requires -Version 5.1
 [CmdletBinding()]
-param([switch]$Rotate, [switch]$Check)
+param(
+    [switch]$Rotate,
+    [switch]$Check,
+    # estacao: sugere a conta compartilhada alloy-estacoes em vez de alloy-<hostname>.
+    [ValidateSet('servidor','estacao')]
+    [string]$Perfil = 'servidor'
+)
 # Valida a conta de servico do Alloy (OAuth2 + ingestao no Loki) e, somente
 # se ambos os testes passarem, grava a credencial com ACL restrita.
 # -Rotate: substitui a credencial existente (apos os mesmos testes).
@@ -166,6 +172,11 @@ if ([string]::IsNullOrWhiteSpace($hostName)) {
     throw 'Nao foi possivel identificar o hostname do Windows.'
 }
 $suggested = 'alloy-' + $hostName.Trim().ToLowerInvariant()
+if ($Perfil -eq 'estacao') {
+    # Estacoes sao descartaveis: uma conta para todas, revogada de uma vez.
+    $suggested = 'alloy-estacoes'
+    Write-Host 'Perfil estacao: use a conta compartilhada das estacoes.'
+}
 $username = (Read-Host "Conta de servico [$suggested]").Trim().ToLowerInvariant()
 if (-not $username) { $username = $suggested }
 # Get-Credential utiliza um campo de senha nativo no Windows PowerShell,
@@ -192,7 +203,7 @@ try {
 }
 
 if ($username -cnotmatch '^alloy-[a-z0-9][a-z0-9-]*$') {
-    throw 'Conta invalida. Formato: alloy-<hostname>.'
+    throw 'Conta invalida. Formato: alloy-<hostname> (ou alloy-estacoes).'
 }
 
 Test-AlloyCredential $credential $username
