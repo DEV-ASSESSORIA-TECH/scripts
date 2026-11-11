@@ -132,8 +132,25 @@ function Get-CredentialUser {
 }
 
 # Estado do servico: @{ Kind = ok|warn|err|off; Text = ... }
+# O servico usa a nossa configuracao? Chave do registro com os argumentos
+# apontando para $ConfigDir e um arquivo base de perfil na pasta. Falso, por
+# exemplo, quando o antivirus interrompeu a instalacao e o Alloy ficou com o
+# exemplo do instalador oficial (roda, mas nao envia nada).
+function Test-AlloyConfigured {
+    Invoke-UiMemo 'configured' {
+        if (-not (Test-PerfilInstalado)) { return $false }
+        try { return @([string[]](Get-ItemProperty -LiteralPath $Registry -ErrorAction Stop).Arguments) -contains $ConfigDir }
+        catch { return $false }
+    }
+}
+
 function Get-ServiceStatus {
-    if (-not (Test-AlloyInstalled)) { return @{ Kind = 'off'; Text = 'nao instalado' } }
+    $svc = Get-AlloyService
+    $hasExe = Test-Path -LiteralPath $Exe -PathType Leaf
+    if (-not $svc -and -not $hasExe) { return @{ Kind = 'off'; Text = 'nao instalado' } }
+    if (-not $hasExe) { return @{ Kind = 'err'; Text = 'executavel ausente (quarentena?)' } }
+    if (-not $svc) { return @{ Kind = 'err'; Text = 'servico ausente (incompleto)' } }
+    if (-not (Test-AlloyConfigured)) { return @{ Kind = 'err'; Text = 'sem configuracao (incompleto)' } }
     if (Test-AlloyRunning) {
         if (Test-AlloyReady) { return @{ Kind = 'ok'; Text = 'ativo e pronto' } }
         return @{ Kind = 'warn'; Text = 'ativo, nao pronto' }
@@ -377,7 +394,17 @@ function Show-AlloyDiagnostics {
     }
     Write-AlloyCtlRow $true
     $files = @(Get-ChildItem -LiteralPath $ConfigDir -Filter '*.alloy' -File -ErrorAction SilentlyContinue).Count
-    Write-UiRow 'Config' 'none' "$ConfigDir ($files arquivo(s) .alloy)"
+    if (Test-AlloyConfigured) {
+        Write-UiRow 'Config' 'none' "$ConfigDir ($files arquivo(s) .alloy)"
+    } elseif (Test-AlloyInstalled) {
+        $using = '?'
+        try { $using = @([string[]](Get-ItemProperty -LiteralPath $Registry -ErrorAction Stop).Arguments) -join ' ' } catch { $using = "registro ausente ($Registry)" }
+        Write-UiRow 'Config' 'err' "$ConfigDir ($files arquivo(s) .alloy): o servico nao usa esta configuracao"
+        Write-UiRow 'Servico usa' 'none' $using
+        Write-UiRow 'Correcao' 'none' '[1] Reaplicar (reinstala o que faltar); veja tambem o antivirus'
+    } else {
+        Write-UiRow 'Config' 'none' "$ConfigDir ($files arquivo(s) .alloy)"
+    }
     if (Test-CredentialPresent) {
         Write-UiRow 'Credencial' 'ok' $Secret
     } else {

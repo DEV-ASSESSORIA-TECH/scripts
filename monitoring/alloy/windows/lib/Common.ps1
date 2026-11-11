@@ -16,6 +16,8 @@ $ServiceName = 'Alloy'
 $ReadyUrl    = 'http://127.0.0.1:12345/-/ready'
 # Comando alloyctl (mesmo valor do alloy.ps1, que roda antes desta lib).
 $AlloyCtlDir = Join-Path $env:ProgramFiles 'AssessoriaTech\alloyctl'
+# Pasta fixa do instalador oficial (mesmo valor do install.ps1).
+$AlloyInstallerDir = Join-Path $env:ProgramData 'AssessoriaTech\alloy-installer'
 $HyperVFile  = Join-Path $ConfigDir 'hyperv.alloy'
 $SqlAnywhereFile = Join-Path $ConfigDir 'sqlanywhere.alloy'
 # Arquivo base de cada perfil (ver install.ps1 -Perfil).
