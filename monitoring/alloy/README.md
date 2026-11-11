@@ -78,6 +78,14 @@ abre o menu.
   com a versão nova. Sem acesso ao GitHub, avisa e segue com a versão
   instalada. `--no-update` (`-NoUpdate`) pula a verificação; `alloyctl update`
   só atualiza e mostra a versão.
+- **Falhas visíveis**: o motivo (ex.: `HTTP 403: limite da API`, nome não
+  resolvido, sem permissão na pasta) aparece na tela, na linha `alloyctl` do
+  cabeçalho do menu e no log: `/var/log/alloyctl.log` (Linux) ou
+  `C:\ProgramData\GrafanaLabs\Alloy\logs\alloyctl-AAAAMMDD.log` (Windows, 14
+  dias). Se a instalação pelo comando do README falhar num terminal
+  interativo, a ferramenta para e pergunta se deve continuar sem o
+  `alloyctl` (arquivos temporários); em automação, segue com aviso. Falha de
+  atualização nunca bloqueia: segue com a versão instalada.
 - **Arquivos sob demanda**: instalação, credencial, módulos e heartbeat são
   baixados na primeira vez que a operação precisa deles, **do mesmo commit** do
   núcleo, e ficam na pasta até a próxima versão.

@@ -81,6 +81,25 @@ service_status() {
   fi
 }
 
+# alloyctl_row header|full: estado do comando alloyctl (ALLOYCTL_* vem do
+# alloy.sh). No cabecalho o motivo de falha e encurtado; o diagnostico o
+# mostra inteiro.
+alloyctl_row() {
+  local text status=${ALLOYCTL_STATUS:-}
+  if [[ $1 == header && ${#status} -gt 40 ]]; then status="${status:0:37}..."; fi
+  case "${ALLOYCTL_MODE:-}" in
+    installed)
+      text="${ALLOYCTL_REF:-?} @ ${ALLOY_REF:0:7}"
+      [[ $1 == full ]] && text+=" ($ALLOYCTL_BIN)"
+      if [[ -n $status ]]; then ui_row alloyctl warn "$text - $status"; else ui_row alloyctl ok "$text"; fi ;;
+    local) ui_row alloyctl none "clone local (ref $ALLOY_REF)" ;;
+    *)
+      text=${status:-nao instalado}
+      [[ $1 == full ]] && text+=" (arquivos temporarios, ref $ALLOY_REF; log /var/log/alloyctl.log)"
+      ui_row alloyctl warn "$text" ;;
+  esac
+}
+
 # LAST_STATUS/LAST_ACTION sao definidos pelo menu do alloy.sh.
 print_header() {
   local status badge text cred_badge cred_text mods heartbeat
@@ -104,11 +123,7 @@ print_header() {
   ui_row Modulos none "$mods"
   heartbeat=$(heartbeat_status)
   [[ -n $heartbeat ]] && ui_row Heartbeat "${heartbeat%%|*}" "${heartbeat#*|}"
-  if [[ $ALLOY_LOCAL == 1 ]]; then
-    ui_row Origem none 'arquivos locais'
-  elif [[ $ALLOY_REF != main ]]; then
-    ui_row Origem none "ref $ALLOY_REF"
-  fi
+  alloyctl_row header
   if [[ -n ${LAST_ACTION:-} ]]; then
     ui_row 'Ultima acao' "${LAST_STATUS:-none}" "$LAST_ACTION"
   fi
@@ -183,11 +198,7 @@ diagnose() {
   else
     ui_row Estado off 'nao instalado'
   fi
-  case "${ALLOYCTL_MODE:-}" in
-    installed) ui_row alloyctl none "${ALLOYCTL_REF:-?} @ ${ALLOY_REF:0:7} ($ALLOYCTL_BIN)" ;;
-    local) ui_row alloyctl none "clone local (ref $ALLOY_REF)" ;;
-    *) ui_row alloyctl warn "nao instalado (arquivos temporarios, ref $ALLOY_REF)" ;;
-  esac
+  alloyctl_row full
   files=$(find "$ETC_DIR" -maxdepth 1 -name '*.alloy' 2>/dev/null | wc -l)
   ui_row Config none "$ETC_DIR ($files arquivo(s) .alloy)"
   if credential_present; then

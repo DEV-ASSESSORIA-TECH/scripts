@@ -1,15 +1,40 @@
 # Leitura do estado local do Alloy (sem alterar nada), cabecalho e diagnostico.
 # Requer lib\Common.ps1 e lib\Ui.ps1.
 
+# ---------------------------------------------------------------- desempenho
+# Quadro do menu: entre Start-UiFrame e Stop-UiFrame, consultas caras
+# (servico, tarefa agendada, /-/ready) sao feitas uma vez e reaproveitadas.
+# Fora do quadro (acoes, Wait-AlloyReady) cada chamada consulta de novo.
+function Start-UiFrame { $script:UiMemo = @{} }
+function Stop-UiFrame { $script:UiMemo = $null }
+# Abre o quadro e ja faz as consultas do cabecalho, antes de limpar a tela:
+# o desenho depois e imediato (sem tela em branco nem desenho em pedacos).
+function Initialize-UiFrame {
+    Start-UiFrame
+    [void](Get-AlloyHostName)
+    [void](Get-ServiceStatus)
+    [void](Get-AlloyVersion)
+    [void](Get-AlloyPerfil)
+    [void](Get-HeartbeatStatus)
+}
+function Invoke-UiMemo([string]$Key, [scriptblock]$Compute) {
+    if ($null -eq $script:UiMemo) { return (& $Compute) }
+    if (-not $script:UiMemo.ContainsKey($Key)) { $script:UiMemo[$Key] = (& $Compute) }
+    return $script:UiMemo[$Key]
+}
+
 # Nome DNS em minusculas, o mesmo usado pelo config.alloy (constants.hostname).
+# Nao muda durante a sessao: uma consulta WMI so.
 function Get-AlloyHostName {
+    if ($script:AlloyHostName) { return $script:AlloyHostName }
     $name = $null
     try { $name = (Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).DNSHostName } catch { }
     if ([string]::IsNullOrWhiteSpace($name)) { $name = $env:COMPUTERNAME }
-    return $name.Trim().ToLowerInvariant()
+    $script:AlloyHostName = $name.Trim().ToLowerInvariant()
+    return $script:AlloyHostName
 }
 
-function Get-AlloyService { Get-Service -Name $ServiceName -ErrorAction SilentlyContinue }
+function Get-AlloyService { Invoke-UiMemo 'service' { Get-Service -Name $ServiceName -ErrorAction SilentlyContinue } }
 function Test-AlloyInstalled { (Test-Path -LiteralPath $Exe -PathType Leaf) -and ($null -ne (Get-AlloyService)) }
 function Test-AlloyRunning { $svc = Get-AlloyService; ($null -ne $svc) -and ($svc.Status -eq 'Running') }
 function Test-CredentialPresent {
@@ -23,16 +48,21 @@ function Test-HeartbeatConfigured {
     (Test-Path -LiteralPath $HeartbeatUrlFile -PathType Leaf) -or ($null -ne (Get-HeartbeatTask))
 }
 function Get-HeartbeatTask {
-    Get-ScheduledTask -TaskPath $HeartbeatTaskPath -TaskName $HeartbeatTaskName -ErrorAction SilentlyContinue
+    Invoke-UiMemo 'heartbeat-task' {
+        Get-ScheduledTask -TaskPath $HeartbeatTaskPath -TaskName $HeartbeatTaskName -ErrorAction SilentlyContinue
+    }
 }
 # Perfil instalado (pelo arquivo base) ou, sem instalacao, o detectado:
 # estacao em Windows de cliente (ProductType 1), servidor nos demais.
 function Get-AlloyPerfil {
     if (Test-Path -LiteralPath $DesktopFile -PathType Leaf) { return 'estacao' }
     if (Test-Path -LiteralPath $ServerFile -PathType Leaf) { return 'servidor' }
-    try {
-        if ((Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType -eq 1) { return 'estacao' }
-    } catch { }
+    # Tipo do Windows nao muda durante a sessao: uma consulta WMI so.
+    if ($null -eq $script:ProductType) {
+        $script:ProductType = 0
+        try { $script:ProductType = [int](Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType } catch { }
+    }
+    if ($script:ProductType -eq 1) { return 'estacao' }
     return 'servidor'
 }
 function Test-PerfilInstalado { (Test-Path -LiteralPath $DesktopFile -PathType Leaf) -or (Test-Path -LiteralPath $ServerFile -PathType Leaf) }
@@ -59,11 +89,25 @@ function Get-AlloyVersion {
     return $script:AlloyVersion
 }
 
+# HttpClient sem proxy e reaproveitado: o Invoke-WebRequest do 5.1 tenta
+# descobrir proxy (WPAD) e pode levar segundos mesmo para 127.0.0.1.
+function Get-ReadyClient {
+    if (-not $script:ReadyClient) {
+        Add-Type -AssemblyName System.Net.Http
+        $handler = [System.Net.Http.HttpClientHandler]::new()
+        $handler.UseProxy = $false
+        $script:ReadyClient = [System.Net.Http.HttpClient]::new($handler)
+        $script:ReadyClient.Timeout = [TimeSpan]::FromSeconds(2)
+    }
+    return $script:ReadyClient
+}
 function Test-AlloyReady {
-    try {
-        $resp = Invoke-WebRequest -Uri $ReadyUrl -UseBasicParsing -TimeoutSec 2
-        return $resp.StatusCode -eq 200
-    } catch { return $false }
+    Invoke-UiMemo 'ready' {
+        try {
+            $resp = (Get-ReadyClient).GetAsync($ReadyUrl).GetAwaiter().GetResult()
+            try { [int]$resp.StatusCode -eq 200 } finally { $resp.Dispose() }
+        } catch { $false }
+    }
 }
 
 function Wait-AlloyReady {
@@ -127,6 +171,29 @@ function Get-HeartbeatStatus {
     return @{ Kind = 'ok'; Text = $text }
 }
 
+# Estado do comando alloyctl ($env:ALLOYCTL_* vem do alloy.ps1). No cabecalho
+# o motivo de falha e encurtado; o diagnostico mostra inteiro.
+function Write-AlloyCtlRow([bool]$Full) {
+    $status = [string]$env:ALLOYCTL_STATUS
+    if (-not $Full -and $status.Length -gt 40) { $status = $status.Substring(0, 37) + '...' }
+    switch ($env:ALLOYCTL_MODE) {
+        'installed' {
+            $text = "$($env:ALLOYCTL_REF) @ $($env:ALLOY_REF.Substring(0, [Math]::Min(7, $env:ALLOY_REF.Length)))"
+            if ($Full) { $text += " ($AlloyCtlDir)" }
+            if ($status) { Write-UiRow 'alloyctl' 'warn' "$text - $status" } else { Write-UiRow 'alloyctl' 'ok' $text }
+        }
+        'local' { Write-UiRow 'alloyctl' 'none' "clone local (ref $($env:ALLOY_REF))" }
+        default {
+            $text = if ($status) { $status } else { 'nao instalado' }
+            if ($Full) {
+                $log = Join-Path $LogDir ('alloyctl-' + (Get-Date -Format 'yyyyMMdd') + '.log')
+                $text += " (arquivos temporarios, ref $($env:ALLOY_REF); log $log)"
+            }
+            Write-UiRow 'alloyctl' 'warn' $text
+        }
+    }
+}
+
 # $script:LastStatus/$script:LastAction sao definidos pelo menu do alloy.ps1.
 function Show-AlloyHeader {
     $status = Get-ServiceStatus
@@ -151,11 +218,7 @@ function Show-AlloyHeader {
     Write-UiRow 'Modulos' 'none' $modules
     $heartbeat = Get-HeartbeatStatus
     if ($heartbeat) { Write-UiRow 'Heartbeat' $heartbeat.Kind $heartbeat.Text }
-    if ($script:LocalMode) {
-        Write-UiRow 'Origem' 'none' 'arquivos locais'
-    } elseif ((Get-AlloyRef) -ne 'main') {
-        Write-UiRow 'Origem' 'none' ('ref ' + (Get-AlloyRef))
-    }
+    Write-AlloyCtlRow $false
     if ($script:LastAction) {
         $kind = if ($script:LastStatus) { $script:LastStatus } else { 'none' }
         Write-UiRow 'Ultima acao' $kind $script:LastAction
@@ -312,11 +375,7 @@ function Show-AlloyDiagnostics {
     } else {
         Write-UiRow 'Estado' 'off' 'nao instalado'
     }
-    switch ($env:ALLOYCTL_MODE) {
-        'installed' { Write-UiRow 'alloyctl' 'none' "$($env:ALLOYCTL_REF) @ $($env:ALLOY_REF.Substring(0, 7)) ($AlloyCtlDir)" }
-        'local' { Write-UiRow 'alloyctl' 'none' "clone local (ref $($env:ALLOY_REF))" }
-        default { Write-UiRow 'alloyctl' 'warn' "nao instalado (arquivos temporarios, ref $($env:ALLOY_REF))" }
-    }
+    Write-AlloyCtlRow $true
     $files = @(Get-ChildItem -LiteralPath $ConfigDir -Filter '*.alloy' -File -ErrorAction SilentlyContinue).Count
     Write-UiRow 'Config' 'none' "$ConfigDir ($files arquivo(s) .alloy)"
     if (Test-CredentialPresent) {
