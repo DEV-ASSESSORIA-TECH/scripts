@@ -69,7 +69,7 @@ abre o menu.
 | | Linux | Windows |
 |-|-------|---------|
 | Ferramenta | `/opt/alloyctl/` | `C:\Program Files\AssessoriaTech\alloyctl\` |
-| Comando | `/usr/local/bin/alloyctl` (link) | `alloyctl.cmd`, pasta no PATH da máquina (vale em terminais novos) |
+| Comando | `/usr/local/bin/alloyctl` (link) | `alloyctl.cmd`, pasta no PATH da máquina (vale em terminais novos); se o registro da máquina recusar (política, antivírus), no PATH do usuário; se também recusar, avisa e indica o caminho completo |
 | Sem administrador | pede `sudo` | pede elevação (UAC) e continua em uma nova janela |
 
 - **Atualização a cada execução**: uma consulta à API do GitHub descobre o
