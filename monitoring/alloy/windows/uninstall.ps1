@@ -24,6 +24,23 @@ function Find-AlloyUninstaller {
     return $null
 }
 
+# alloyctl: pasta e entrada do PATH da maquina. O PowerShell ja leu este
+# script (pode estar na propria pasta) e o alloyctl.cmd encerra sem reler o
+# arquivo, entao a pasta pode ser removida agora.
+function Remove-AlloyCtl {
+    if (Test-Path -LiteralPath $AlloyCtlDir) {
+        Remove-Item -LiteralPath $AlloyCtlDir -Recurse -Force
+        Remove-IfEmpty (Split-Path -Parent $AlloyCtlDir)
+    }
+    $key = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+    $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $entries = @($current -split ';' | Where-Object { $_ })
+    $kept = @($entries | Where-Object { $_.TrimEnd('\') -ine $AlloyCtlDir })
+    if ($kept.Count -ne $entries.Count) {
+        Set-ItemProperty -LiteralPath $key.PSPath -Name 'Path' -Value ($kept -join ';') -Type ExpandString
+    }
+}
+
 function Remove-IfEmpty([string]$Path) {
     if ((Test-Path -LiteralPath $Path -PathType Container) -and
         -not (Get-ChildItem -LiteralPath $Path -Force | Select-Object -First 1)) {
@@ -47,7 +64,7 @@ if ($Purge) {
     if ($inventoryTask) { $targets += "tarefa agendada $InventoryTaskPath$InventoryTaskName" }
     if ($sqlTask) { $targets += "tarefa agendada $SqlTaskPath$SqlTaskName" }
     if ($heartbeatTask) { $targets += "tarefa agendada $HeartbeatTaskPath$HeartbeatTaskName (heartbeat)" }
-    foreach ($path in @($Base, $InstallDir)) {
+    foreach ($path in @($Base, $InstallDir, $AlloyCtlDir)) {
         if (Test-Path -LiteralPath $path) { $targets += $path }
     }
     if (Test-Path -LiteralPath $Registry) { $targets += $Registry }
@@ -141,6 +158,7 @@ if ($Purge) {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
     }
     if (Test-Path -LiteralPath $Registry) { Remove-Item -LiteralPath $Registry -Recurse -Force }
+    Remove-AlloyCtl
     Remove-IfEmpty (Split-Path -Parent $Base)
     Remove-IfEmpty (Split-Path -Parent $InstallDir)
     Remove-IfEmpty 'HKLM:\SOFTWARE\GrafanaLabs'

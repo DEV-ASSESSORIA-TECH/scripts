@@ -1,13 +1,17 @@
-#Requires -RunAsAdministrator
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-Ponto de entrada unico do Grafana Alloy no Windows Server.
+Ponto de entrada unico do Grafana Alloy no Windows Server (comando alloyctl).
 
 .DESCRIPTION
 Sem comando: primeira instalacao guiada (credencial + instalacao) ou, se o
 servidor ja tiver credencial ou Alloy, menu interativo com o estado atual.
-Baixa sob demanda, do mesmo ref, apenas os arquivos de cada operacao.
+
+Executado a partir do download (comando do README), instala o comando
+alloyctl (C:\Program Files\AssessoriaTech\alloyctl, no PATH da maquina) e
+segue por ele. O alloyctl se atualiza a cada execucao pela branch
+acompanhada e baixa sob demanda, presos ao mesmo commit, apenas os arquivos
+de cada operacao. Sem Administrador, pede elevacao (UAC) e abre em nova janela.
 
 Comandos:
   install      credencial (se ausente) + instalacao/reaplicacao
@@ -19,72 +23,286 @@ Comandos:
                opcionais (separados por virgula; os nao listados saem)
   upgrade      atualiza o Alloy
   status       diagnostico (servico, eventos, conectividade, consultas)
-  uninstall    remove o Alloy, mantendo credencial e configuracao [-Yes]
-  purge        limpeza completa, inclui a credencial [-Yes]
+  uninstall    remove o Alloy, mantendo credencial, configuracao e o alloyctl [-Yes]
+  purge        limpeza completa, inclui a credencial e o alloyctl [-Yes]
   heartbeat    configura o heartbeat (Uptime Kuma Push + Loki) [-Url <url>]
   heartbeat-test    executa o heartbeat agora e mostra o resultado
   heartbeat-remove  remove o heartbeat [-Yes]
+  update       atualiza so o alloyctl e mostra a versao
   menu         abre o menu mesmo na primeira execucao
   help         esta ajuda
 
 .PARAMETER Ref
-Branch, tag ou commit do repositorio usado nos downloads (padrao: main).
+Branch, tag ou commit acompanhado pelo alloyctl (padrao: main). Fica gravado
+para as proximas execucoes.
+
+.PARAMETER NoUpdate
+Nao atualiza o alloyctl antes de executar.
 
 .PARAMETER Url
 URL de push do Uptime Kuma (comando heartbeat, sem terminal interativo).
 
 .EXAMPLE
-.\alloy.ps1
+alloyctl
 
 .EXAMPLE
-.\alloy.ps1 modules hyperv
-
-.EXAMPLE
-.\alloy.ps1 modules hyperv,sqlanywhere
+alloyctl modules hyperv,sqlanywhere
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [ValidateSet('menu', 'install', 'credentials', 'check', 'rotate', 'modules', 'upgrade', 'status', 'uninstall', 'purge',
-                 'heartbeat', 'heartbeat-test', 'heartbeat-remove', 'help')]
+                 'heartbeat', 'heartbeat-test', 'heartbeat-remove', 'update', 'help')]
     [string]$Command = '',
+    # Validado abaixo: pelo alloyctl.cmd ou na elevacao, "hyperv,sqlanywhere"
+    # chega como um unico texto.
     [Parameter(Position = 1)]
-    [ValidateSet('auto', 'hyperv', 'sqlanywhere', 'none')]
     [string[]]$Modules = @('auto'),
     [switch]$Upgrade,
     [switch]$Yes,
     [string]$Ref,
-    [string]$Url
+    [string]$Url,
+    [switch]$NoUpdate,
+    # Reexecucao elevada (nova janela): pausa no final para mostrar o resultado.
+    [Parameter(DontShow)]
+    [switch]$Elevated
 )
 
 $ErrorActionPreference = 'Stop'
 if ($Command -eq 'help') { Get-Help $PSCommandPath -Detailed; return }
-if ($Ref) { $env:ALLOY_REF = $Ref }
-if (-not $env:ALLOY_REF) { $env:ALLOY_REF = 'main' }
+$Modules = @($Modules | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($Modules.Count -eq 0) { $Modules = @('auto') }
+foreach ($module in $Modules) {
+    if ($module -notin @('auto', 'hyperv', 'sqlanywhere', 'none')) {
+        throw "Modulo invalido: $module (use auto, hyperv, sqlanywhere ou none)."
+    }
+}
+if (-not $Ref -and $env:ALLOY_REF) { $Ref = $env:ALLOY_REF }
+# Argumentos recebidos, sem Ref/NoUpdate/Elevated (tratados aqui).
+$PassArgs = @{}
+foreach ($key in $PSBoundParameters.Keys) {
+    if ($key -notin @('Ref', 'NoUpdate', 'Elevated')) { $PassArgs[$key] = $PSBoundParameters[$key] }
+}
+$PassArgs['Modules'] = $Modules
+
+# --------------------------------------------------------------- elevacao
+$identity = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if (-not $identity.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    if ([Console]::IsInputRedirected -or -not $PSCommandPath) { throw 'Execute como Administrador.' }
+    $quote = { param($Text) '"' + ([string]$Text -replace '"', '\"') + '"' }
+    $line = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (& $quote $PSCommandPath))
+    foreach ($key in $PassArgs.Keys) {
+        $value = $PassArgs[$key]
+        if ($value -is [Management.Automation.SwitchParameter]) {
+            if ($value.IsPresent) { $line += "-$key" }
+        } else {
+            $line += "-$key"
+            $line += (& $quote (@($value) -join ','))
+        }
+    }
+    if ($Ref) { $line += '-Ref'; $line += (& $quote $Ref) }
+    if ($NoUpdate) { $line += '-NoUpdate' }
+    $line += '-Elevated'
+    Write-Host '[alloyctl] Sem permissao de Administrador: solicitando elevacao (UAC). Continua em uma nova janela.'
+    try {
+        $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList ($line -join ' ') -Verb RunAs -Wait -PassThru
+    } catch {
+        throw "Elevacao cancelada ou negada: $($_.Exception.Message)"
+    }
+    exit $process.ExitCode
+}
+
+# --------------------------------------------------------------- alloyctl
+$ToolDir = Join-Path $env:ProgramFiles 'AssessoriaTech\alloyctl'
+$ToolCmd = Join-Path $ToolDir 'alloyctl.cmd'
+$ToolRepo = 'DEV-ASSESSORIA-TECH/scripts'
+$ToolRemoteDir = 'monitoring/alloy/windows'
+# Nucleo baixado a cada versao; o resto vem sob demanda (Save-RemoteFiles).
+$ToolCore = @('alloy.ps1', 'lib/Common.ps1', 'lib/State.ps1', 'lib/Ui.ps1')
+
+function Write-ToolLog([string]$Text) { Write-Host "[alloyctl] $Text" }
+function Write-ToolWarn([string]$Text) { Write-Host "[alloyctl] AVISO: $Text" -ForegroundColor Yellow }
+function Test-ToolRef([string]$Value) { ($Value -match '^[A-Za-z0-9][A-Za-z0-9._/-]*$') -and -not $Value.Contains('..') }
+
+function Get-ToolHttp {
+    if (-not $script:ToolHttp) {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        Add-Type -AssemblyName System.Net.Http
+        $script:ToolHttp = [System.Net.Http.HttpClient]::new()
+        $script:ToolHttp.Timeout = [TimeSpan]::FromSeconds(20)
+        $script:ToolHttp.DefaultRequestHeaders.UserAgent.ParseAdd('AssessoriaTech-Alloy-Installer/1.0')
+    }
+    return $script:ToolHttp
+}
+
+# Commit atual de uma branch/tag (uma requisicao a API do GitHub); $null se falhar.
+function Resolve-ToolSha([string]$Value) {
+    try {
+        $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get,
+            "https://api.github.com/repos/$ToolRepo/commits/$Value")
+        [void]$request.Headers.TryAddWithoutValidation('Accept', 'application/vnd.github.sha')
+        $response = (Get-ToolHttp).SendAsync($request).GetAwaiter().GetResult()
+        try {
+            if (-not $response.IsSuccessStatusCode) { return $null }
+            $sha = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult().Trim()
+        } finally { $response.Dispose() }
+        if ($sha -cmatch '^[0-9a-f]{40}$') { return $sha }
+    } catch { }
+    return $null
+}
+
+# PATH da maquina sem expandir (preserva %SystemRoot% etc.) e aviso aos
+# processos abertos (WM_SETTINGCHANGE), como o Painel de Controle faz.
+function Add-ToolPath {
+    $key = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+    $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    $entries = @($current -split ';' | Where-Object { $_ })
+    if (@($entries | Where-Object { $_.TrimEnd('\') -ieq $ToolDir }).Count -gt 0) { return }
+    $value = (@($entries) + $ToolDir) -join ';'
+    Set-ItemProperty -LiteralPath $key.PSPath -Name 'Path' -Value $value -Type ExpandString
+    try {
+        Add-Type -Namespace AlloyCtl -Name Native -MemberDefinition @'
+[DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
+    uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+'@
+        $result = [UIntPtr]::Zero
+        [void][AlloyCtl.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+    } catch { }
+}
+
+# Baixa o nucleo do commit em um diretorio novo e troca o diretorio inteiro
+# (descarta os arquivos sob demanda da versao anterior). O PowerShell ja leu
+# o script em execucao: renomear a pasta nao o afeta.
+function Install-Tool([string]$TrackedRef, [string]$Sha) {
+    $parent = Split-Path -Parent $ToolDir
+    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+    $stage = $ToolDir + '.new-' + [guid]::NewGuid().ToString('N')
+    $old = $null
+    try {
+        foreach ($name in $ToolCore) {
+            $target = Join-Path $stage ($name -replace '/', '\')
+            $dir = Split-Path -Parent $target
+            if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+            $bytes = (Get-ToolHttp).GetByteArrayAsync("https://raw.githubusercontent.com/$ToolRepo/$Sha/$ToolRemoteDir/$name").GetAwaiter().GetResult()
+            if ($bytes.Length -eq 0) { throw "Download vazio: $name" }
+            [IO.File]::WriteAllBytes($target, $bytes)
+            $tokens = $null
+            $errors = $null
+            [void][Management.Automation.Language.Parser]::ParseFile($target, [ref]$tokens, [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) { throw "$name com erro de sintaxe: $($errors[0].Message)" }
+        }
+        [IO.File]::WriteAllText((Join-Path $stage 'ref'), $TrackedRef + "`r`n")
+        [IO.File]::WriteAllText((Join-Path $stage 'version'), $Sha + "`r`n")
+        # "& exit /b" na mesma linha: o cmd nao rele o .cmd depois do PowerShell
+        # (o arquivo pode ter sido trocado ou removido nesse meio tempo).
+        $shim = "@echo off`r`nrem alloyctl: Grafana Alloy (gerado pelo alloy.ps1; atualizado a cada versao).`r`n" +
+            "`"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`" -NoProfile -ExecutionPolicy Bypass -File `"%~dp0alloy.ps1`" %* & exit /b`r`n"
+        [IO.File]::WriteAllText((Join-Path $stage 'alloyctl.cmd'), $shim, [Text.Encoding]::ASCII)
+        if (Test-Path -LiteralPath $ToolDir) {
+            $old = $ToolDir + '.old-' + [guid]::NewGuid().ToString('N')
+            Rename-Item -LiteralPath $ToolDir -NewName (Split-Path -Leaf $old)
+        }
+        Rename-Item -LiteralPath $stage -NewName (Split-Path -Leaf $ToolDir)
+    } catch {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+        if ($old -and -not (Test-Path -LiteralPath $ToolDir) -and (Test-Path -LiteralPath $old)) {
+            Rename-Item -LiteralPath $old -NewName (Split-Path -Leaf $ToolDir) -ErrorAction SilentlyContinue
+        }
+        Write-ToolWarn "falha ao instalar o alloyctl: $($_.Exception.Message)"
+        return $false
+    }
+    if ($old) { Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue }
+    Add-ToolPath
+    return $true
+}
+
+# Executa a versao instalada no mesmo processo, sem nova verificacao.
+function Invoke-Tool {
+    $arguments = @{} + $PassArgs
+    $arguments['NoUpdate'] = $true
+    if ($Elevated) { $arguments['Elevated'] = $true }
+    & (Join-Path $ToolDir 'alloy.ps1') @arguments
+}
+
+if ($Ref -and -not (Test-ToolRef $Ref)) { throw "Referencia invalida: $Ref" }
+$toolMode = 'bootstrap'
+if ($PSScriptRoot -and ($PSScriptRoot.TrimEnd('\') -ieq $ToolDir)) {
+    $toolMode = 'installed'
+} elseif ($PSScriptRoot -and (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'install.ps1')) -and
+          (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'lib\Common.ps1'))) {
+    $toolMode = 'local'   # clone do repositorio: usa os arquivos locais
+}
+
+if ($toolMode -eq 'bootstrap') {
+    # Comando do README: instala (ou atualiza) o alloyctl e segue por ele.
+    $tracked = if ($Ref) { $Ref } else { 'main' }
+    $first = -not (Test-Path -LiteralPath (Join-Path $ToolDir 'alloy.ps1'))
+    $sha = Resolve-ToolSha $tracked
+    if ($sha -and (Install-Tool $tracked $sha)) {
+        if ($first) {
+            Write-ToolLog "comando instalado em $ToolDir (acompanha $tracked). Em um novo terminal, use: alloyctl"
+        }
+        Invoke-Tool
+        return
+    }
+    Write-ToolWarn 'nao foi possivel instalar o alloyctl; seguindo com arquivos temporarios.'
+} elseif ($toolMode -eq 'installed') {
+    $tracked = 'main'
+    try { $tracked = ([IO.File]::ReadAllText((Join-Path $ToolDir 'ref'))).Trim() } catch { }
+    if (-not (Test-ToolRef $tracked)) { $tracked = 'main' }
+    $version = ''
+    try { $version = ([IO.File]::ReadAllText((Join-Path $ToolDir 'version'))).Trim() } catch { }
+    $force = $false
+    if ($Ref -and $Ref -ne $tracked) { $tracked = $Ref; $force = $true }
+    if (-not $NoUpdate -or $force) {
+        $sha = Resolve-ToolSha $tracked
+        if (-not $sha) {
+            Write-ToolWarn "sem atualizacao (GitHub inacessivel ou ref '$tracked' inexistente); usando $($version.Substring(0, [Math]::Min(7, $version.Length)))."
+        } elseif ($sha -ne $version -or $force) {
+            if (Install-Tool $tracked $sha) {
+                Write-ToolLog "atualizado: $($version.Substring(0, [Math]::Min(7, $version.Length))) -> $($sha.Substring(0, 7)) ($tracked)"
+                Invoke-Tool
+                return
+            }
+        }
+    }
+    if ($version -cnotmatch '^[0-9a-f]{40}$') { throw "$ToolDir\version invalido; rode o comando do README." }
+}
 
 # ------------------------------------------------------------------ bootstrap
-# Clone do repositorio: usa os arquivos locais. Caso contrario (arquivo
-# baixado sozinho), trabalha numa pasta temporaria propria.
-$script:LocalMode = (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'install.ps1')) -and
-                    (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'lib\Common.ps1'))
 $workDir = $null
-$src = $PSScriptRoot
-if (-not $script:LocalMode) {
-    $workDir = Join-Path $env:TEMP ('alloy-cli-' + [guid]::NewGuid().ToString('N'))
-    $src = $workDir
+switch ($toolMode) {
+    'installed' {
+        # Tudo o que for baixado daqui em diante vem do mesmo commit.
+        $env:ALLOY_REF = $version
+        $env:ALLOYCTL_REF = $tracked
+        $script:LocalMode = $false
+        $src = $ToolDir
+    }
+    'local' {
+        $env:ALLOY_REF = if ($Ref) { $Ref } else { 'main' }
+        $script:LocalMode = $true
+        $src = $PSScriptRoot
+    }
+    default {
+        $env:ALLOY_REF = if ($Ref) { $Ref } else { 'main' }
+        $script:LocalMode = $false
+        $workDir = Join-Path $env:TEMP ('alloy-cli-' + [guid]::NewGuid().ToString('N'))
+        $src = $workDir
+    }
 }
+$env:ALLOYCTL_MODE = $toolMode
 
 try {
     if ($workDir) {
         New-Item -ItemType Directory -Path (Join-Path $workDir 'lib') -Force | Out-Null
-        $ref = $env:ALLOY_REF
-        if ($ref -notmatch '^[A-Za-z0-9][A-Za-z0-9._/-]*$' -or $ref.Contains('..')) { throw "Referencia invalida: $ref" }
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         try {
             Invoke-WebRequest -UseBasicParsing -OutFile (Join-Path $workDir 'lib\Common.ps1') `
-                -Uri "https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ref/monitoring/alloy/windows/lib/Common.ps1"
+                -Uri "https://raw.githubusercontent.com/$ToolRepo/$($env:ALLOY_REF)/$ToolRemoteDir/lib/Common.ps1"
         } catch {
-            throw "Falha ao baixar as bibliotecas (ref $ref): $($_.Exception.Message)"
+            throw "Falha ao baixar as bibliotecas (ref $($env:ALLOY_REF)): $($_.Exception.Message)"
         }
     }
     . (Join-Path $src 'lib\Common.ps1')
@@ -172,6 +390,23 @@ try {
         & (Join-Path $src 'uninstall.ps1') @Arguments
     }
 
+    # A limpeza completa remove tambem o alloyctl: nada mais a executar.
+    function Test-ToolRemoved {
+        return ($toolMode -eq 'installed') -and -not (Test-Path -LiteralPath (Join-Path $ToolDir 'alloy.ps1'))
+    }
+
+    function Invoke-ToolVersion {
+        if ($toolMode -ne 'installed') {
+            throw 'alloyctl nao instalado; execute o comando do README (sem -NoUpdate) para instalar.'
+        }
+        Write-Ok "alloyctl $tracked @ $($version.Substring(0, 7)) ($ToolCmd)"
+    }
+
+    function Get-ReopenHint {
+        if ($toolMode -eq 'installed') { return 'execute: alloyctl' }
+        return 'execute o mesmo comando.'
+    }
+
     # Heartbeat opcional: nunca sugerido na instalacao, so pelo menu [9] ou comando.
     function Invoke-Heartbeat([hashtable]$Arguments = @{}) {
         Save-RemoteFiles $src @('heartbeat-setup.ps1', 'heartbeat.ps1')
@@ -200,7 +435,7 @@ try {
         $script:LastStatus = 'ok'
         $script:LastAction = "Primeira instalacao - concluida ($(Get-Date -Format 'HH:mm'))"
         Show-AlloyHeader
-        Write-Host '  Para gerenciar este servidor depois, execute o mesmo comando.'
+        Write-Host "  Para gerenciar este servidor depois, $(Get-ReopenHint)"
     }
 
     # Tela propria para a acao, resultado e "ultima acao" no cabecalho.
@@ -318,7 +553,13 @@ try {
                     Wait-UiKey
                 }
                 '7' { Invoke-Screen 'Desinstalar' { Invoke-Uninstall } }
-                '8' { Invoke-Screen 'Limpeza completa' { Invoke-Uninstall @{ Purge = $true } } }
+                '8' {
+                    Invoke-Screen 'Limpeza completa' { Invoke-Uninstall @{ Purge = $true } }
+                    if (Test-ToolRemoved) {
+                        Write-Log 'alloyctl removido. Para instalar de novo, use o comando do README.'
+                        return
+                    }
+                }
                 '9' {
                     if (Test-HeartbeatConfigured) { Show-HeartbeatMenu }
                     else { Invoke-Screen 'Configurar heartbeat' { Invoke-Heartbeat } }
@@ -326,7 +567,7 @@ try {
                 { $_ -in @('0', 'q', 'Q') } {
                     Clear-UiScreen
                     Show-AlloySummary
-                    Write-Host '  Para abrir o menu de novo, execute o mesmo comando.'
+                    Write-Host "  Para abrir o menu de novo, $(Get-ReopenHint)"
                     return
                 }
             }
@@ -360,8 +601,14 @@ try {
         }
         'heartbeat-test' { Invoke-Heartbeat @{ Test = $true } }
         'heartbeat-remove' { Invoke-Heartbeat @{ Remove = $true; Yes = [bool]$Yes } }
+        'update' { Invoke-ToolVersion }
     }
 } finally {
     if ($script:HttpClient) { $script:HttpClient.Dispose() }
+    if ($script:ToolHttp) { $script:ToolHttp.Dispose() }
     if ($workDir) { Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($Elevated -and -not [Console]::IsInputRedirected) {
+        Write-Host ''
+        [void](Read-Host '  Enter para fechar esta janela')
+    }
 }

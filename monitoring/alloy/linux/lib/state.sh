@@ -183,6 +183,11 @@ diagnose() {
   else
     ui_row Estado off 'nao instalado'
   fi
+  case "${ALLOYCTL_MODE:-}" in
+    installed) ui_row alloyctl none "${ALLOYCTL_REF:-?} @ ${ALLOY_REF:0:7} ($ALLOYCTL_BIN)" ;;
+    local) ui_row alloyctl none "clone local (ref $ALLOY_REF)" ;;
+    *) ui_row alloyctl warn "nao instalado (arquivos temporarios, ref $ALLOY_REF)" ;;
+  esac
   files=$(find "$ETC_DIR" -maxdepth 1 -name '*.alloy' 2>/dev/null | wc -l)
   ui_row Config none "$ETC_DIR ($files arquivo(s) .alloy)"
   if credential_present; then
