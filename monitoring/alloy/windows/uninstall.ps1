@@ -74,7 +74,7 @@ if ($Purge) {
     if ($inventoryTask) { $targets += "tarefa agendada $InventoryTaskPath$InventoryTaskName" }
     if ($sqlTask) { $targets += "tarefa agendada $SqlTaskPath$SqlTaskName" }
     if ($heartbeatTask) { $targets += "tarefa agendada $HeartbeatTaskPath$HeartbeatTaskName (heartbeat)" }
-    foreach ($path in @($Base, $InstallDir, $AlloyCtlDir)) {
+    foreach ($path in @($Base, $InstallDir, $AlloyCtlDir, $AlloyInstallerDir)) {
         if (Test-Path -LiteralPath $path) { $targets += $path }
     }
     if (Test-Path -LiteralPath $Registry) { $targets += $Registry }
@@ -169,6 +169,10 @@ if ($Purge) {
     }
     if (Test-Path -LiteralPath $Registry) { Remove-Item -LiteralPath $Registry -Recurse -Force }
     Remove-AlloyCtl
+    if (Test-Path -LiteralPath $AlloyInstallerDir) {
+        Remove-Item -LiteralPath $AlloyInstallerDir -Recurse -Force
+        Remove-IfEmpty (Split-Path -Parent $AlloyInstallerDir)
+    }
     Remove-IfEmpty (Split-Path -Parent $Base)
     Remove-IfEmpty (Split-Path -Parent $InstallDir)
     Remove-IfEmpty 'HKLM:\SOFTWARE\GrafanaLabs'

@@ -30,7 +30,19 @@ $BackupDir = Join-Path $Base 'backups'
 $Exe = Join-Path $env:ProgramFiles 'GrafanaLabs\Alloy\alloy-windows-amd64.exe'
 $Registry = 'HKLM:\SOFTWARE\GrafanaLabs\Alloy'
 $Service = 'Alloy'
-$InstallerUrl = 'https://github.com/grafana/alloy/releases/latest/download/alloy-installer-windows-amd64.exe.zip'
+# Instalador oficial: baixado para uma pasta FIXA (nunca %TEMP%\<aleatorio>, que
+# antivirus com analise de comportamento, como o Bitdefender ATC, tratam como
+# "script baixou e executou binario desconhecido"), conferido pelo SHA256SUMS
+# da release e pela assinatura da Grafana Labs antes de executar. A pasta fixa
+# permite exclusao por caminho no antivirus (README, secao Antivirus).
+$InstallerDir = Join-Path $env:ProgramData 'AssessoriaTech\alloy-installer'
+$InstallerZipName = 'alloy-installer-windows-amd64.exe.zip'
+$InstallerExeName = 'alloy-installer-windows-amd64.exe'
+$InstallerUrl = "https://github.com/grafana/alloy/releases/latest/download/$InstallerZipName"
+# Assinante esperado (Microsoft Trusted Signing: o certificado muda a cada
+# poucos dias, entao a conferencia e pelo nome, nunca pela impressao digital).
+$InstallerSigner = 'Grafana Labs'
+$ReadyTimeoutSeconds = 60
 # Modulos com tarefa agendada: scripts\, textfile\<modulo>\ e logs\ sao
 # compartilhados; cada modulo le apenas o proprio subdiretorio do textfile.
 $ScriptsDir = Join-Path $Base 'scripts'
@@ -76,18 +88,160 @@ function Same-File([string]$A, [string]$B) {
     if (-not (Test-Path -LiteralPath $B -PathType Leaf)) { return $false }
     return (Get-FileHash -LiteralPath $A -Algorithm SHA256).Hash -ceq (Get-FileHash -LiteralPath $B -Algorithm SHA256).Hash
 }
+# Cliente HTTP sem proxy para 127.0.0.1: o Invoke-WebRequest do 5.1 tenta
+# descobrir proxy (WPAD) e pode levar segundos por tentativa.
+function Get-LocalHttp {
+    if (-not $script:LocalHttp) {
+        Add-Type -AssemblyName System.Net.Http
+        $handler = [System.Net.Http.HttpClientHandler]::new()
+        $handler.UseProxy = $false
+        $script:LocalHttp = [System.Net.Http.HttpClient]::new($handler)
+        $script:LocalHttp.Timeout = [TimeSpan]::FromSeconds(2)
+    }
+    return $script:LocalHttp
+}
+
+# Ate $ReadyTimeoutSeconds: a primeira inicializacao numa estacao pode demorar
+# (o antivirus examina o executavel novo). Volta assim que o Alloy responde.
 function Ready {
-    for ($i = 0; $i -lt 15; $i++) {
+    $deadline = (Get-Date).AddSeconds($ReadyTimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
         $svc = Get-Service -Name $Service -ErrorAction SilentlyContinue
         if ($svc -and $svc.Status -eq 'Running') {
             try {
-                $resp = Invoke-WebRequest -Uri 'http://127.0.0.1:12345/-/ready' -UseBasicParsing -TimeoutSec 2
-                if ($resp.StatusCode -eq 200) { return $true }
+                $resp = (Get-LocalHttp).GetAsync('http://127.0.0.1:12345/-/ready').GetAwaiter().GetResult()
+                try { if ([int]$resp.StatusCode -eq 200) { return $true } } finally { $resp.Dispose() }
             } catch { }
         }
         Start-Sleep -Seconds 1
     }
     return $false
+}
+
+# Ultimas mensagens do Alloy no Event Viewer desde $Since (para o erro).
+function Get-AlloyEventSummary([datetime]$Since) {
+    try {
+        $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Application'; ProviderName = 'Alloy'; StartTime = $Since } -MaxEvents 40 -ErrorAction Stop)
+        $lines = @($events | Where-Object { $_.Message -match 'level=(warn|error)|level=(WARN|ERROR)|failed|error' } |
+            Select-Object -First 4 | ForEach-Object { '  ' + (($_.Message -split "`r?`n")[0]).Trim() })
+        if ($lines.Count -eq 0) { $lines = @($events | Select-Object -First 2 | ForEach-Object { '  ' + (($_.Message -split "`r?`n")[0]).Trim() }) }
+        if ($lines.Count -gt 0) { return "`nUltimos eventos do Alloy (Event Viewer > Aplicativo):`n" + ($lines -join "`n") }
+    } catch { }
+    return ''
+}
+
+# Texto padrao quando o antivirus e o suspeito provavel.
+function Get-AntivirusHint {
+    return "`nProvavel bloqueio do antivirus (ex.: Bitdefender Advanced Threat Control): verifique a quarentena e as exclusoes " +
+        "de $InstallerDir, $(Split-Path -Parent $Exe) e $Base (README, secao Antivirus)."
+}
+
+# Baixa o instalador oficial para $InstallerDir e confere SHA256 (SHA256SUMS
+# da mesma release) e assinatura (Grafana Labs). Devolve o caminho do .exe.
+function Get-VerifiedInstaller {
+    # ProgramData permite que qualquer usuario crie pastas: a pasta-mae tambem
+    # fica so para SYSTEM e Administradores (dono incluso), para ninguem trocar
+    # o instalador entre a conferencia e a execucao.
+    $installerParent = Split-Path -Parent $InstallerDir
+    Ensure-Directory $installerParent
+    Set-PrivateDirectoryAcl $installerParent
+    Ensure-Directory $InstallerDir
+    Set-PrivateDirectoryAcl $InstallerDir
+    Get-ChildItem -LiteralPath $InstallerDir -Force | Remove-Item -Recurse -Force
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+    Add-Type -AssemblyName System.Net.Http
+    # Versao atual: "latest" redireciona para releases/download/vX.Y.Z/<arquivo>.
+    # So o primeiro redirecionamento traz a versao (o seguinte vai para o CDN),
+    # entao esta consulta nao segue redirecionamentos.
+    $probeHandler = [System.Net.Http.HttpClientHandler]::new()
+    $probeHandler.AllowAutoRedirect = $false
+    $probe = [System.Net.Http.HttpClient]::new($probeHandler)
+    try {
+        $probe.Timeout = [TimeSpan]::FromSeconds(30)
+        $probe.DefaultRequestHeaders.UserAgent.ParseAdd('AssessoriaTech-Alloy-Installer/1.0')
+        $response = $probe.GetAsync($InstallerUrl).GetAwaiter().GetResult()
+        try {
+            $location = if ($response.Headers.Location) { $response.Headers.Location.ToString() } else { '' }
+        } finally { $response.Dispose() }
+    } finally { $probe.Dispose() }
+    if ($location -notmatch '/releases/download/(v[0-9][A-Za-z0-9.+-]*)/') {
+        throw "Nao foi possivel identificar a versao atual do Alloy (redirecionamento: '$location')."
+    }
+    $release = $Matches[1]
+    $releaseBase = "https://github.com/grafana/alloy/releases/download/$release"
+
+    $http = [System.Net.Http.HttpClient]::new()
+    try {
+        $http.Timeout = [TimeSpan]::FromMinutes(5)
+        $http.DefaultRequestHeaders.UserAgent.ParseAdd('AssessoriaTech-Alloy-Installer/1.0')
+        Log "Baixando instalador oficial do Grafana Alloy ($release)..."
+        $zip = Join-Path $InstallerDir $InstallerZipName
+        $response = $http.GetAsync("$releaseBase/$InstallerZipName").GetAwaiter().GetResult()
+        try {
+            if (-not $response.IsSuccessStatusCode) { throw "Download do instalador falhou (HTTP $([int]$response.StatusCode))." }
+            [IO.File]::WriteAllBytes($zip, $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult())
+        } finally { $response.Dispose() }
+        $sums = $http.GetStringAsync("$releaseBase/SHA256SUMS").GetAwaiter().GetResult()
+    } finally { $http.Dispose() }
+
+    $expected = @{}
+    foreach ($line in ($sums -split "`n")) {
+        if ($line.Trim() -match '^([0-9a-fA-F]{64})\s+\*?(\S+)$') { $expected[$Matches[2]] = $Matches[1].ToLowerInvariant() }
+    }
+    if (-not $expected.ContainsKey($InstallerZipName)) { throw "SHA256SUMS da release $release nao lista $InstallerZipName." }
+    $zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($zipHash -ne $expected[$InstallerZipName]) { throw "SHA256 do instalador nao confere com a release $release. Download descartado." }
+
+    $unpack = Join-Path $InstallerDir 'package'
+    Ensure-Directory $unpack
+    Expand-Archive -LiteralPath $zip -DestinationPath $unpack -Force
+    $installer = Join-Path $unpack $InstallerExeName
+    if (-not (Test-Path -LiteralPath $installer -PathType Leaf)) {
+        throw ("Executavel do instalador ausente depois de extrair (removido logo apos a extracao?)." + (Get-AntivirusHint))
+    }
+    if ($expected.ContainsKey($InstallerExeName) -and
+        (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected[$InstallerExeName]) {
+        throw "SHA256 de $InstallerExeName nao confere com a release $release."
+    }
+
+    $signature = Get-AuthenticodeSignature -LiteralPath $installer
+    $subject = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { '' }
+    if ([string]$signature.Status -in @('NotSigned', 'HashMismatch', 'NotSupportedFileFormat')) {
+        throw "Instalador sem assinatura valida ($($signature.Status)). Execucao cancelada."
+    }
+    if ($subject -notmatch ('(^|,\s*)CN=' + [regex]::Escape($InstallerSigner) + '(,|$)') -or
+        $subject -notmatch ('(^|,\s*)O=' + [regex]::Escape($InstallerSigner) + '(,|$)')) {
+        throw "Instalador assinado por '$subject', esperado $InstallerSigner. Execucao cancelada."
+    }
+    if ([string]$signature.Status -ne 'Valid') {
+        # Ex.: raiz da Microsoft ausente num Windows sem atualizacoes. O SHA256
+        # ja confere com a release; o assinante tambem.
+        Write-Warning "Cadeia do certificado nao validada neste Windows ($($signature.Status)); SHA256 e assinante conferem. Atualize os certificados raiz."
+    }
+    Log "Instalador $release conferido (SHA256 da release e assinatura $InstallerSigner)."
+    return $installer
+}
+
+# Executa o instalador oficial (silencioso) e confere o resultado.
+function Install-AlloyPackage {
+    $installer = Get-VerifiedInstaller
+    try {
+        $p = Start-Process -FilePath $installer -ArgumentList @('/S', '/DISABLEREPORTING=yes') -Wait -PassThru
+    } catch {
+        throw ("Nao foi possivel executar o instalador: $($_.Exception.Message)" + (Get-AntivirusHint))
+    }
+    if ($p.ExitCode -ne 0) {
+        throw ("Instalador interrompido ou com erro (codigo $($p.ExitCode))." + (Get-AntivirusHint))
+    }
+    $missing = @()
+    if (-not (Test-Path -LiteralPath $Exe -PathType Leaf)) { $missing += 'executavel' }
+    if (-not (Get-Service -Name $Service -ErrorAction SilentlyContinue)) { $missing += 'servico' }
+    if (-not (Test-Path -LiteralPath $Registry)) { $missing += 'registro' }
+    if ($missing.Count -gt 0) {
+        throw ("Alloy nao foi instalado corretamente (ausente: $($missing -join ', '))." + (Get-AntivirusHint))
+    }
+    # A pasta fica (para a exclusao do antivirus); o conteudo sai.
+    Get-ChildItem -LiteralPath $InstallerDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 function Set-PrivateDirectoryAcl([string]$Path) {
     $acl = [System.Security.AccessControl.DirectorySecurity]::new()
@@ -471,6 +625,13 @@ $backup = $null
 $priorArgsExist = $false
 $priorArgs = @()
 $priorRunning = $false
+# O servico ja usava a nossa configuracao antes desta execucao? Se nao (primeira
+# instalacao, ou o Alloy rodando com o exemplo do instalador oficial), uma falha
+# deixa o servico parado, em vez de "ativo e pronto" sem coletar nada.
+$priorOurs = $false
+try { $priorOurs = @([string[]](Get-ItemProperty -LiteralPath $Registry -ErrorAction Stop).Arguments) -contains $ConfigDir } catch { }
+$configConfirmed = $false
+$startedAt = Get-Date
 $priorAuto = $false
 $target = Join-Path $ConfigDir $BaseName
 # Arquivo base do outro perfil: removido ao aplicar (os dois nao convivem).
@@ -500,22 +661,23 @@ try {
         }
     }
 
-    $existing = (Test-Path -LiteralPath $Exe -PathType Leaf) -and ($null -ne (Get-Service -Name $Service -ErrorAction SilentlyContinue))
+    # Instalacao completa = executavel + servico + chave do registro (onde o
+    # servico le os argumentos). Uma parte faltando (antivirus que removeu o
+    # executavel ou desfez o registro, desinstalacao interrompida) e reinstalada.
+    $hasExe = Test-Path -LiteralPath $Exe -PathType Leaf
+    $hasService = $null -ne (Get-Service -Name $Service -ErrorAction SilentlyContinue)
+    $hasRegistry = Test-Path -LiteralPath $Registry
+    $existing = $hasExe -and $hasService -and $hasRegistry
+    if (-not $existing -and ($hasExe -or $hasService -or $hasRegistry)) {
+        $absent = @()
+        if (-not $hasExe) { $absent += "executavel ($Exe)" }
+        if (-not $hasService) { $absent += 'servico' }
+        if (-not $hasRegistry) { $absent += "registro ($Registry)" }
+        Write-Warning ("Instalacao do Alloy incompleta (ausente: $($absent -join ', ')); reinstalando com o instalador oficial." +
+            $(if (-not $hasExe -or -not $hasRegistry) { Get-AntivirusHint } else { '' }))
+    }
     if (-not $existing -or $Upgrade) {
-        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-        Log 'Baixando instalador oficial do Grafana Alloy...'
-        $zip = Join-Path $stage 'installer.zip'
-        Invoke-WebRequest -Uri $InstallerUrl -OutFile $zip -UseBasicParsing
-        $unpack = Join-Path $stage 'package'
-        Ensure-Directory $unpack
-        Expand-Archive -LiteralPath $zip -DestinationPath $unpack -Force
-        $installer = Join-Path $unpack 'alloy-installer-windows-amd64.exe'
-        if (-not (Test-Path -LiteralPath $installer)) { throw 'Executavel de instalacao nao encontrado.' }
-        $p = Start-Process -FilePath $installer -ArgumentList @('/S', '/DISABLEREPORTING=yes') -Wait -PassThru
-        if ($p.ExitCode -ne 0) { throw "Instalador retornou codigo $($p.ExitCode)." }
-        if (-not (Test-Path -LiteralPath $Exe) -or -not (Get-Service -Name $Service -ErrorAction SilentlyContinue)) {
-            throw 'Alloy nao foi instalado corretamente.'
-        }
+        Install-AlloyPackage
     } else {
         Log 'Alloy instalado: download e upgrade ignorados.'
     }
@@ -636,12 +798,16 @@ try {
     }
     New-ItemProperty -LiteralPath $Registry -Name 'Arguments' -PropertyType MultiString -Value ([string[]]$argsNew) -Force | Out-Null
     Set-Service -Name $Service -StartupType Automatic
+    $startedAt = Get-Date
     Start-Service -Name $Service -ErrorAction Stop
-    if (-not (Ready)) { throw 'Alloy nao ficou pronto (127.0.0.1:12345).'}
+    if (-not (Ready)) {
+        throw ("Alloy nao ficou pronto em ${ReadyTimeoutSeconds}s (127.0.0.1:12345)." + (Get-AlloyEventSummary $startedAt))
+    }
     $active = @('Windows')
     if ($hypervEnabled) { $active += 'Hyper-V' }
     if ($sqlEnabled) { $active += 'SQL Anywhere' }
     Log "Alloy ativo e pronto. Perfil: $Perfil. Modulos: $($active -join ' + ')."
+    $configConfirmed = $true
     # Configuracao confirmada: uma falha das tarefas dos modulos daqui em
     # diante e reportada, mas nao desfaz o Alloy que ja esta funcionando.
     $applied = $false
@@ -677,15 +843,25 @@ try {
             } else {
                 Remove-ItemProperty -LiteralPath $Registry -Name 'Arguments' -ErrorAction SilentlyContinue
             }
-            if ($priorAuto) { Set-Service -Name $Service -StartupType Automatic }
-            else { Set-Service -Name $Service -StartupType Manual }
-            if ($priorRunning) {
-                Start-Service -Name $Service
-                if (-not (Ready)) { Write-Warning 'Alloy anterior nao ficou pronto apos rollback.' }
+            if ($priorOurs) {
+                if ($priorAuto) { Set-Service -Name $Service -StartupType Automatic }
+                else { Set-Service -Name $Service -StartupType Manual }
+                if ($priorRunning) {
+                    Start-Service -Name $Service
+                    if (-not (Ready)) { Write-Warning 'Alloy anterior nao ficou pronto apos rollback.' }
+                }
             }
         } catch { Write-Warning "Rollback incompleto. Verifique $backup." }
     }
+    if (-not $priorOurs -and -not $configConfirmed -and (Get-Service -Name $Service -ErrorAction SilentlyContinue)) {
+        # Nada nosso a preservar: sem configuracao valida o Alloy so pareceria
+        # saudavel. Fica parado ate uma instalacao concluir.
+        Stop-Service -Name $Service -ErrorAction SilentlyContinue
+        Set-Service -Name $Service -StartupType Manual -ErrorAction SilentlyContinue
+        Write-Warning 'Alloy parado (inicio manual): a instalacao nao foi concluida. Corrija o erro abaixo e execute [1] de novo.'
+    }
     throw $original
 } finally {
+    if ($script:LocalHttp) { $script:LocalHttp.Dispose() }
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
 }

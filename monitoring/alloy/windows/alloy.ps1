@@ -684,7 +684,7 @@ try {
             Initialize-UiFrame
             $installed = Test-AlloyInstalled
             $default = ''
-            if (-not $installed -or -not (Test-AlloyRunning)) { $default = '1' }
+            if (-not $installed -or -not (Test-AlloyRunning) -or -not (Test-AlloyConfigured)) { $default = '1' }
             $label1 = if ($installed) { 'Reaplicar configuracao' } else { 'Instalar Alloy' }
             $label5 = if (Test-CredentialPresent) { 'Rotacionar' } else { 'Configurar' }
             $color1 = if ($default) { 'Green' } else { '' }
