@@ -32,12 +32,22 @@ function Remove-AlloyCtl {
         Remove-Item -LiteralPath $AlloyCtlDir -Recurse -Force
         Remove-IfEmpty (Split-Path -Parent $AlloyCtlDir)
     }
-    $key = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
-    $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    $entries = @($current -split ';' | Where-Object { $_ })
-    $kept = @($entries | Where-Object { $_.TrimEnd('\') -ine $AlloyCtlDir })
-    if ($kept.Count -ne $entries.Count) {
-        Set-ItemProperty -LiteralPath $key.PSPath -Name 'Path' -Value ($kept -join ';') -Type ExpandString
+    # PATH da maquina e do usuario (o alloy.ps1 usa o do usuario quando o
+    # registro da maquina recusa). Falha aqui so avisa: a pasta ja saiu.
+    $keys = @('HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment', 'HKCU:\Environment')
+    foreach ($keyPath in $keys) {
+        try {
+            if (-not (Test-Path -LiteralPath $keyPath)) { continue }
+            $key = Get-Item -LiteralPath $keyPath
+            $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            $entries = @($current -split ';' | Where-Object { $_ })
+            $kept = @($entries | Where-Object { $_.TrimEnd('\') -ine $AlloyCtlDir })
+            if ($kept.Count -ne $entries.Count) {
+                New-ItemProperty -LiteralPath $keyPath -Name 'Path' -Value ($kept -join ';') -PropertyType ExpandString -Force | Out-Null
+            }
+        } catch {
+            Write-Warn "Nao foi possivel tirar $AlloyCtlDir do PATH ($keyPath): $($_.Exception.Message)"
+        }
     }
 }
 

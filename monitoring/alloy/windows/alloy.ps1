@@ -209,36 +209,75 @@ function Resolve-ToolSha([string]$Value) {
     return $null
 }
 
-# PATH da maquina sem expandir (preserva %SystemRoot% etc.) e aviso aos
-# processos abertos (WM_SETTINGCHANGE), como o Painel de Controle faz.
-function Add-ToolPath {
-    $key = Get-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
-    $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-    $entries = @($current -split ';' | Where-Object { $_ })
-    if (@($entries | Where-Object { $_.TrimEnd('\') -ieq $ToolDir }).Count -gt 0) { return }
-    $value = (@($entries) + $ToolDir) -join ';'
-    Set-ItemProperty -LiteralPath $key.PSPath -Name 'Path' -Value $value -Type ExpandString
+# PATH: a pasta do alloyctl entra no PATH da maquina; se o registro recusar
+# (politica, antivirus/EDR), no PATH do usuario atual. Valor sem expandir
+# (preserva %SystemRoot% etc.) e aviso aos processos abertos (WM_SETTINGCHANGE).
+# Nunca lanca excecao: devolve 'maquina', 'usuario' ou $null (motivo em
+# $script:PathError); $script:PathAdded indica que a pasta acabou de entrar.
+$ToolPathTargets = @(
+    @{ Scope = 'maquina'; Key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment' },
+    @{ Scope = 'usuario'; Key = 'HKCU:\Environment' }
+)
+function Get-ToolPathValue([string]$KeyPath) {
     try {
-        Add-Type -Namespace AlloyCtl -Name Native -MemberDefinition @'
+        $key = Get-Item -LiteralPath $KeyPath -ErrorAction Stop
+        return [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+    } catch { return '' }
+}
+function Test-ToolPathEntry([string]$Value) {
+    return @($Value -split ';' | Where-Object { $_ -and $_.TrimEnd('\') -ieq $ToolDir }).Count -gt 0
+}
+function Send-EnvironmentChange {
+    try {
+        if (-not ('AlloyCtl.Native' -as [type])) {
+            Add-Type -Namespace AlloyCtl -Name Native -MemberDefinition @'
 [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
 public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wParam, string lParam,
     uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
 '@
+        }
         $result = [UIntPtr]::Zero
         [void][AlloyCtl.Native]::SendMessageTimeout([IntPtr]0xffff, 0x1A, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
     } catch { }
+}
+function Add-ToolPath {
+    $script:PathError = $null
+    $script:PathAdded = $false
+    foreach ($target in $ToolPathTargets) {
+        if (Test-ToolPathEntry (Get-ToolPathValue $target.Key)) { return $target.Scope }
+    }
+    $failures = @()
+    foreach ($target in $ToolPathTargets) {
+        try {
+            if (-not (Test-Path -LiteralPath $target.Key)) { New-Item -Path $target.Key -Force -ErrorAction Stop | Out-Null }
+            $entries = @((Get-ToolPathValue $target.Key) -split ';' | Where-Object { $_ })
+            New-ItemProperty -LiteralPath $target.Key -Name 'Path' -Value ((@($entries) + $ToolDir) -join ';') `
+                -PropertyType ExpandString -Force -ErrorAction Stop | Out-Null
+            Send-EnvironmentChange
+            if ($failures) { Write-ToolFileLog "PATH recusado: $($failures -join '; ')" }
+            Write-ToolFileLog "PATH: $ToolDir incluido (PATH do $($target.Scope))"
+            $script:PathAdded = $true
+            return $target.Scope
+        } catch {
+            $failures += "PATH do $($target.Scope): $(Get-ToolErrorText $_.Exception)"
+        }
+    }
+    $script:PathError = $failures -join '; '
+    Write-ToolFileLog "FALHA PATH: $script:PathError"
+    return $null
 }
 
 # Baixa o nucleo do commit em um diretorio novo e troca o diretorio inteiro
 # (descarta os arquivos sob demanda da versao anterior). O PowerShell ja leu
 # o script em execucao: renomear a pasta nao o afeta.
+# O PATH e tratado na execucao seguinte (modo instalado), nunca aqui.
 function Install-Tool([string]$TrackedRef, [string]$Sha) {
     $script:ToolError = $null
-    $parent = Split-Path -Parent $ToolDir
-    if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     $stage = $ToolDir + '.new-' + [guid]::NewGuid().ToString('N')
     $old = $null
     try {
+        $parent = Split-Path -Parent $ToolDir
+        if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
         foreach ($name in $ToolCore) {
             $target = Join-Path $stage ($name -replace '/', '\')
             $dir = Split-Path -Parent $target
@@ -272,7 +311,6 @@ function Install-Tool([string]$TrackedRef, [string]$Sha) {
         return $false
     }
     if ($old) { Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue }
-    Add-ToolPath
     return $true
 }
 
@@ -301,7 +339,7 @@ if ($toolMode -eq 'bootstrap') {
     if ($sha -and (Install-Tool $tracked $sha)) {
         if ($first) {
             Write-ToolFileLog "instalado: $tracked @ $($sha.Substring(0, 7))"
-            Write-ToolLog "comando instalado em $ToolDir (acompanha $tracked). Em um novo terminal, use: alloyctl"
+            Write-ToolLog "alloyctl instalado em $ToolDir (acompanha $tracked)."
         } else {
             Write-ToolFileLog "atualizado pelo comando do README: $tracked @ $($sha.Substring(0, 7))"
         }
@@ -355,6 +393,18 @@ if ($toolMode -eq 'bootstrap') {
         }
     }
     if ($version -cnotmatch '^[0-9a-f]{40}$') { throw "$ToolDir\version invalido; rode o comando do README." }
+
+    # PATH conferido a cada execucao (rapido quando ja esta): cobre a primeira
+    # instalacao, uma pasta removida do PATH e uma recusa anterior do registro.
+    $pathScope = Add-ToolPath
+    if ($script:PathAdded) {
+        Write-ToolLog "comando alloyctl disponivel em terminais novos (PATH do $pathScope)."
+    }
+    if (-not $pathScope) {
+        Write-ToolWarn "nao foi possivel incluir $ToolDir no PATH ($script:PathError)."
+        Write-ToolWarn "Enquanto isso, use: & '$ToolCmd'   Log: $ToolLogFile"
+        if (-not $env:ALLOYCTL_STATUS) { $env:ALLOYCTL_STATUS = "fora do PATH: $script:PathError" }
+    }
 }
 
 # ------------------------------------------------------------------ bootstrap
