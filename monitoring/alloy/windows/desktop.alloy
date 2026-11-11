@@ -1,0 +1,109 @@
+// Perfil estacao: Windows de uso pessoal, descartavel. Substitui o config.alloy.
+// Jobs proprios (integrations/windows-desktop e windows-desktop-eventlog): fora
+// dos alertas e dos dashboards de servidores, que fixam o job.
+// Coleta mais leve que a do servidor: sem servicos, scrape de 60s e so eventos
+// de nivel critico, erro e aviso.
+
+prometheus.exporter.windows "windows" {
+  enabled_collectors = [
+    "cpu",
+    "logical_disk",
+    "memory",
+    "net",
+    "os",
+    "physical_disk",
+    "system",
+  ]
+}
+
+discovery.relabel "windows" {
+  targets = prometheus.exporter.windows.windows.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "integrations/windows-desktop"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = string.to_lower(constants.hostname)
+  }
+  rule {
+    target_label = "host"
+    replacement  = string.to_lower(constants.hostname)
+  }
+}
+
+prometheus.scrape "windows" {
+  targets         = discovery.relabel.windows.output
+  scrape_interval = "60s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
+
+prometheus.remote_write "central" {
+  endpoint {
+    url = "https://mon.assessoriatech.com/api/v1/write"
+    oauth2 {
+      client_id          = "1T4SNZ8iDuvM18ZIB9fSc109ZZVglsXBtLxeU4ng"
+      client_secret_file = "C:\\ProgramData\\GrafanaLabs\\Alloy\\oauth-client-secret"
+      token_url          = "https://auth.assessoriatech.com/application/o/token/"
+      scopes             = ["profile"]
+    }
+  }
+}
+
+// Mesmos bookmarks do perfil servidor: trocar de perfil nao reenvia o historico.
+// Level 1 = critico, 2 = erro, 3 = aviso.
+loki.source.windowsevent "application" {
+  eventlog_name          = "Application"
+  xpath_query            = "*[System[(Level=1 or Level=2 or Level=3)]]"
+  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\application.xml"
+  use_incoming_timestamp = true
+  labels = {
+    host    = string.to_lower(constants.hostname),
+    channel = "Application",
+    job     = "windows-desktop-eventlog",
+  }
+  forward_to = [loki.process.eventlog.receiver]
+}
+
+loki.source.windowsevent "system" {
+  eventlog_name          = "System"
+  xpath_query            = "*[System[(Level=1 or Level=2 or Level=3)]]"
+  bookmark_path          = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\bookmarks\\system.xml"
+  use_incoming_timestamp = true
+  labels = {
+    host    = string.to_lower(constants.hostname),
+    channel = "System",
+    job     = "windows-desktop-eventlog",
+  }
+  forward_to = [loki.process.eventlog.receiver]
+}
+
+// Eventos originais permanecem em JSON (incluindo event_id e source).
+// Somente severity/level e indexada, caso o campo esteja disponivel.
+loki.process "eventlog" {
+  forward_to = [loki.write.central.receiver]
+
+  stage.json {
+    expressions = {
+      level = "level",
+    }
+  }
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+}
+
+loki.write "central" {
+  endpoint {
+    url = "https://mon.assessoriatech.com/loki/api/v1/push"
+    oauth2 {
+      client_id          = "1T4SNZ8iDuvM18ZIB9fSc109ZZVglsXBtLxeU4ng"
+      client_secret_file = "C:\\ProgramData\\GrafanaLabs\\Alloy\\oauth-client-secret"
+      token_url          = "https://auth.assessoriatech.com/application/o/token/"
+      scopes             = ["profile"]
+    }
+  }
+}

@@ -47,7 +47,7 @@ diagnóstico mostra avisos e erros das últimas 24h, a conectividade com
 )
 ```
 
-**Windows Server (PowerShell como Administrador)**
+**Windows Server ou estação (PowerShell como Administrador)**
 
 ```powershell
 $dir = Join-Path $env:TEMP ("alloy-" + [guid]::NewGuid())
@@ -100,7 +100,7 @@ Os mesmos comandos valem para `alloyctl` e para o ponto de entrada baixado
 
 | Linux | Windows | Ação |
 |-------|---------|------|
-| `install [--modules docker\|none] [--upgrade]` | `install [-Modules hyperv,sqlanywhere\|none] [-Upgrade]` | credencial (se ausente) + instalação |
+| `install [--modules docker\|none] [--upgrade]` | `install [-Perfil servidor\|estacao] [-Modules hyperv,sqlanywhere\|none] [-Upgrade]` | credencial (se ausente) + instalação |
 | `credentials` | `credentials` | só o setup da credencial |
 | `check` | `check` | testa a credencial gravada, sem alterar nada |
 | `rotate` | `rotate` | troca a credencial e reinicia o Alloy |
@@ -129,11 +129,45 @@ Os mesmos comandos valem para `alloyctl` e para o ponto de entrada baixado
 | `install.*` | instala o Alloy e aplica a configuração, com validação e rollback |
 | `uninstall.*` | desinstalação e limpeza completa |
 | `config.alloy` | configuração base do sistema |
+| `desktop.alloy` | configuração base do perfil estação (Windows), no lugar do `config.alloy` |
 | `docker.alloy` / `hyperv.alloy` / `sqlanywhere.alloy` | módulos opcionais |
 | `hypervisor-inventory.ps1` | inventário de VMs do módulo Hyper-V (tarefa agendada) |
 | `sqlanywhere-collector.ps1` | coletor do módulo SQL Anywhere (tarefa agendada) |
 | `heartbeat-setup.*` | configura, testa e remove o heartbeat |
 | `heartbeat.*` | heartbeat executado a cada minuto (tarefa agendada / timer systemd) |
+
+## Perfil estação (Windows)
+
+Para máquinas Windows de uso pessoal, descartáveis, que podem sumir a qualquer
+momento. Elas publicam em jobs próprios e por isso ficam fora dos alertas e dos
+dashboards de servidores, que sempre fixam o job:
+
+| | Servidor | Estação |
+|---|---|---|
+| Configuração | `config\config.alloy` | `config\desktop.alloy` |
+| Métricas | `integrations/windows` | `integrations/windows-desktop` |
+| Logs | `windows-eventlog` | `windows-desktop-eventlog` (só crítico, erro e aviso) |
+| Coletores | inclui `service` | sem `service`; scrape de 60 s |
+| Credencial | `alloy-<hostname>` | compartilhada: `alloy-estacoes` |
+| Módulos opcionais e heartbeat | disponíveis | não se aplicam |
+| Alertas | sim | nenhum |
+
+Na primeira instalação o perfil é detectado: estação no Windows de cliente
+(10/11), servidor no Windows Server. No modo interativo dá para trocar antes de
+continuar; na automação, use `alloyctl install -Perfil estacao`. Depois,
+reaplicar e atualizar mantêm o perfil instalado. Trocar de perfil é
+`alloyctl install -Perfil <outro>`: o arquivo base do outro perfil é removido
+(com o mesmo rollback) e, ao virar estação, os módulos opcionais ativos são
+desativados. No menu, **[2] Módulos** e **[9] Heartbeat** aparecem como
+"(so servidor)" e só servem para remover o que já existia.
+
+A conta `alloy-estacoes` é uma só para todas as estações: uma máquina que some
+não deixa credencial órfã, e revogar a conta corta todas de uma vez.
+
+Ao converter para estação uma máquina que já mandava métricas como servidor, a
+série antiga some e o alerta de servidor sem métricas (WIN-102) dispara por até
+7 dias. Marque o host como `ignorar` em `servidores:` no `catalogo.yml` do
+`grafana-dashboards` durante a transição.
 
 ## Módulos opcionais (Windows)
 

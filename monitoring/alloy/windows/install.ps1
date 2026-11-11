@@ -6,12 +6,18 @@
 #   hyperv, sqlanywhere    ativa exatamente os listados (os demais saem)
 #   none                   desativa todos
 # -ReconfigureSqlAnywhere: pede de novo servidor, banco e usuario do SQL Anywhere.
+# -Perfil: servidor (config.alloy, job integrations/windows, com alertas) ou
+#   estacao (desktop.alloy, job integrations/windows-desktop: maquina
+#   descartavel, sem alertas e sem modulos opcionais). auto (padrao) mantem o
+#   instalado; na primeira instalacao, estacao se o Windows for de cliente.
 [CmdletBinding()]
 param(
     [switch]$Upgrade,
     [ValidateSet('auto','hyperv','sqlanywhere','none')]
     [string[]]$Modules = @('auto'),
-    [switch]$ReconfigureSqlAnywhere
+    [switch]$ReconfigureSqlAnywhere,
+    [ValidateSet('auto','servidor','estacao')]
+    [string]$Perfil = 'auto'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -367,6 +373,30 @@ if ($Modules.Count -gt 1 -and (($Modules -contains 'auto') -or ($Modules -contai
 }
 $autoModules = $Modules -contains 'auto'
 
+# Perfil: define o arquivo base; o do outro perfil e removido ao aplicar.
+$PerfilFiles = @{ servidor = 'config.alloy'; estacao = 'desktop.alloy' }
+if ($Perfil -eq 'auto') {
+    if (Test-Path -LiteralPath (Join-Path $ConfigDir 'desktop.alloy') -PathType Leaf) { $Perfil = 'estacao' }
+    elseif (Test-Path -LiteralPath (Join-Path $ConfigDir 'config.alloy') -PathType Leaf) { $Perfil = 'servidor' }
+    else {
+        # ProductType 1 = Windows de cliente (10/11); 2 e 3 = Windows Server.
+        $Perfil = 'servidor'
+        try { if ((Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType -eq 1) { $Perfil = 'estacao' } } catch { }
+        Log "Perfil detectado: $Perfil (use -Perfil servidor|estacao para escolher)."
+    }
+}
+$BaseName = $PerfilFiles[$Perfil]
+$OtherName = if ($Perfil -eq 'estacao') { $PerfilFiles.servidor } else { $PerfilFiles.estacao }
+if ($Perfil -eq 'estacao') {
+    $optional = @($Modules | Where-Object { $_ -in @('hyperv', 'sqlanywhere') })
+    if ($optional.Count -gt 0) { throw "Modulos opcionais ($($optional -join ', ')) nao se aplicam ao perfil estacao." }
+    if (Test-Path -LiteralPath (Join-Path $Base 'heartbeat\kuma-url')) {
+        Write-Warning 'Heartbeat configurado: estacoes nao usam heartbeat. Remova com "alloyctl heartbeat-remove" e exclua o monitor no Kuma.'
+    }
+    # Sem deteccao nem pergunta: modulos ativos sao desativados abaixo.
+    $autoModules = $false
+}
+
 $hypervEnabled = $false
 if ($autoModules) {
     if (Test-Path -LiteralPath $HyperVModule -PathType Leaf) {
@@ -427,12 +457,12 @@ if ($sqlEnabled) {
     throw '-ReconfigureSqlAnywhere requer o modulo SQL Anywhere ativo.'
 }
 
-$Source = Join-Path $PSScriptRoot 'config.alloy'
+$Source = Join-Path $PSScriptRoot $BaseName
 if (-not (Test-Path -LiteralPath $Secret -PathType Leaf) -or (Get-Item -LiteralPath $Secret).Length -eq 0) {
     throw 'Credencial ausente. Execute alloy.ps1 (ou setup-credentials.ps1) primeiro.'
 }
 if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
-    throw 'config.alloy nao encontrado ao lado de install.ps1.'
+    throw "$BaseName nao encontrado ao lado de install.ps1."
 }
 $stage = Join-Path $env:TEMP ('alloy-stage-' + [guid]::NewGuid().ToString('N'))
 Ensure-Directory $stage
@@ -442,9 +472,11 @@ $priorArgsExist = $false
 $priorArgs = @()
 $priorRunning = $false
 $priorAuto = $false
-$target = Join-Path $ConfigDir 'config.alloy'
+$target = Join-Path $ConfigDir $BaseName
+# Arquivo base do outro perfil: removido ao aplicar (os dois nao convivem).
+$otherTarget = Join-Path $ConfigDir $OtherName
 try {
-    Copy-Item -LiteralPath $Source -Destination (Join-Path $stage 'config.alloy')
+    Copy-Item -LiteralPath $Source -Destination (Join-Path $stage $BaseName)
     $stageInventory = $null
     if ($hypervEnabled) {
         Copy-ModuleFile 'hyperv.alloy' (Join-Path $stage 'hyperv.alloy')
@@ -462,7 +494,7 @@ try {
     }
     if (Test-Path -LiteralPath $ConfigDir -PathType Container) {
         Get-ChildItem -LiteralPath $ConfigDir -Filter '*.alloy' -File | ForEach-Object {
-            if ($_.Name -notin @('config.alloy', 'hyperv.alloy', 'sqlanywhere.alloy')) {
+            if ($_.Name -notin @('config.alloy', 'desktop.alloy', 'hyperv.alloy', 'sqlanywhere.alloy')) {
                 Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage $_.Name)
             }
         }
@@ -543,7 +575,7 @@ try {
     $svc = Get-Service -Name $Service
     $priorRunning = $svc.Status -eq 'Running'
     $priorAuto = $svc.StartType -eq 'Automatic'
-    $configChanged = -not (Same-File $Source $target)
+    $configChanged = (-not (Same-File $Source $target)) -or (Test-Path -LiteralPath $otherTarget)
     $moduleSource = Join-Path $stage 'hyperv.alloy'
     $moduleChanged = if ($hypervEnabled) {
         -not (Same-File $moduleSource $HyperVModule)
@@ -566,7 +598,9 @@ try {
 
     $backup = Join-Path $BackupDir ('apply-' + (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N'))
     Ensure-Directory $backup
-    if (Test-Path -LiteralPath $target) { Copy-Item -LiteralPath $target -Destination (Join-Path $backup 'config.alloy') }
+    foreach ($path in @($target, $otherTarget)) {
+        if (Test-Path -LiteralPath $path) { Copy-Item -LiteralPath $path -Destination (Join-Path $backup (Split-Path -Leaf $path)) }
+    }
     if (Test-Path -LiteralPath $HyperVModule) { Copy-Item -LiteralPath $HyperVModule -Destination (Join-Path $backup 'hyperv.alloy') }
     if (Test-Path -LiteralPath $SqlAnywhereModule) { Copy-Item -LiteralPath $SqlAnywhereModule -Destination (Join-Path $backup 'sqlanywhere.alloy') }
     if ($priorArgsExist) { [IO.File]::WriteAllLines((Join-Path $backup 'Arguments.txt'), $priorArgs) }
@@ -582,7 +616,10 @@ try {
     Log 'Aplicando configuracao em ProgramData e atualizando argumentos do servico...'
     if ($priorRunning) { Stop-Service -Name $Service -ErrorAction Stop }
     $applied = $true
-    if ($configChanged) { Copy-Item -LiteralPath $Source -Destination $target -Force }
+    if ($configChanged) {
+        Copy-Item -LiteralPath $Source -Destination $target -Force
+        if (Test-Path -LiteralPath $otherTarget) { Remove-Item -LiteralPath $otherTarget -Force -ErrorAction Stop }
+    }
     if ($moduleChanged) {
         if ($hypervEnabled) {
             Copy-Item -LiteralPath $moduleSource -Destination $HyperVModule -Force
@@ -604,7 +641,7 @@ try {
     $active = @('Windows')
     if ($hypervEnabled) { $active += 'Hyper-V' }
     if ($sqlEnabled) { $active += 'SQL Anywhere' }
-    Log "Alloy ativo e pronto. Modulos: $($active -join ' + ')."
+    Log "Alloy ativo e pronto. Perfil: $Perfil. Modulos: $($active -join ' + ')."
     # Configuracao confirmada: uma falha das tarefas dos modulos daqui em
     # diante e reportada, mas nao desfaz o Alloy que ja esta funcionando.
     $applied = $false
@@ -615,11 +652,13 @@ try {
         Write-Warning 'Falha apos aplicar a configuracao. Iniciando rollback...'
         try {
             Stop-Service -Name $Service -ErrorAction SilentlyContinue
-            $saved = Join-Path $backup 'config.alloy'
-            if (Test-Path -LiteralPath $saved) {
-                Copy-Item -LiteralPath $saved -Destination $target -Force
-            } else {
-                Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue
+            foreach ($path in @($target, $otherTarget)) {
+                $saved = Join-Path $backup (Split-Path -Leaf $path)
+                if (Test-Path -LiteralPath $saved) {
+                    Copy-Item -LiteralPath $saved -Destination $path -Force
+                } else {
+                    Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                }
             }
             $savedModule = Join-Path $backup 'hyperv.alloy'
             if (Test-Path -LiteralPath $savedModule) {

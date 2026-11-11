@@ -25,6 +25,17 @@ function Test-HeartbeatConfigured {
 function Get-HeartbeatTask {
     Get-ScheduledTask -TaskPath $HeartbeatTaskPath -TaskName $HeartbeatTaskName -ErrorAction SilentlyContinue
 }
+# Perfil instalado (pelo arquivo base) ou, sem instalacao, o detectado:
+# estacao em Windows de cliente (ProductType 1), servidor nos demais.
+function Get-AlloyPerfil {
+    if (Test-Path -LiteralPath $DesktopFile -PathType Leaf) { return 'estacao' }
+    if (Test-Path -LiteralPath $ServerFile -PathType Leaf) { return 'servidor' }
+    try {
+        if ((Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop).ProductType -eq 1) { return 'estacao' }
+    } catch { }
+    return 'servidor'
+}
+function Test-PerfilInstalado { (Test-Path -LiteralPath $DesktopFile -PathType Leaf) -or (Test-Path -LiteralPath $ServerFile -PathType Leaf) }
 function Test-FirstRun { -not (Test-CredentialPresent) -and -not (Test-AlloyInstalled) }
 
 # O executavel do Alloy nao traz versao nos metadados. Ordem: registro de
@@ -130,6 +141,10 @@ function Show-AlloyHeader {
     } else {
         Write-UiRow 'Credencial' 'warn' 'ausente'
     }
+    $perfilText = Get-AlloyPerfil
+    if (-not (Test-PerfilInstalado)) { $perfilText += ' (detectado)' }
+    elseif ($perfilText -eq 'estacao') { $perfilText += ' (sem alertas)' }
+    Write-UiRow 'Perfil' 'none' $perfilText
     $modules = 'Windows'
     if (Test-HyperVModule) { $modules += ' + Hyper-V' }
     if (Test-SqlAnywhereModule) { $modules += ' + SQL Anywhere' }
@@ -340,8 +355,10 @@ function Show-AlloyDiagnostics {
     Test-Endpoint 'Mon' 'mon.assessoriatech.com'
 
     Write-UiSection 'GRAFANA - EXPLORE (ULTIMA 1H)'
-    Write-Query 'Metricas' $GrafanaDsMetrics "up{job=`"integrations/windows`",host=`"$hostName`"}"
-    Write-Query 'Logs' $GrafanaDsLogs "{job=`"windows-eventlog`",host=`"$hostName`"}"
+    $metricsJob = 'integrations/windows'; $logsJob = 'windows-eventlog'
+    if ((Get-AlloyPerfil) -eq 'estacao') { $metricsJob = 'integrations/windows-desktop'; $logsJob = 'windows-desktop-eventlog' }
+    Write-Query 'Metricas' $GrafanaDsMetrics "up{job=`"$metricsJob`",host=`"$hostName`"}"
+    Write-Query 'Logs' $GrafanaDsLogs "{job=`"$logsJob`",host=`"$hostName`"}"
     if (Test-HyperVModule) {
         Write-Query 'Hyper-V' $GrafanaDsMetrics "up{job=`"integrations/hyperv`",host=`"$hostName`"}"
         Write-Query 'Inventario' $GrafanaDsMetrics "hypervisor_inventory_success{job=`"integrations/hypervisor`",host=`"$hostName`"}"
