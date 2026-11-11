@@ -12,6 +12,8 @@ param(
 # se ambos os testes passarem, grava a credencial com ACL restrita.
 # -Rotate: substitui a credencial existente (apos os mesmos testes).
 # -Check:  testa a credencial ja gravada, sem alterar nada.
+# Sem terminal (ex.: Tactical RMM): senha em $env:ALLOY_PASSWORD, conta
+# sugerida pelo perfil (alloy-estacoes ou alloy-<hostname>).
 # Equivalente Windows do linux/setup-credentials.py.
 
 $ErrorActionPreference = 'Stop'
@@ -177,16 +179,32 @@ if ($Perfil -eq 'estacao') {
     $suggested = 'alloy-estacoes'
     Write-Host 'Perfil estacao: use a conta compartilhada das estacoes.'
 }
-$username = (Read-Host "Conta de servico [$suggested]").Trim().ToLowerInvariant()
-if (-not $username) { $username = $suggested }
-# Get-Credential utiliza um campo de senha nativo no Windows PowerShell,
-# permitindo colar a senha sem expor o conteudo no console.
-$dialog = Get-Credential -UserName $username -Message 'Informe a senha de aplicativo do Alloy'
-if ($null -eq $dialog) { throw 'Operacao cancelada.' }
-if ($dialog.UserName -cne $username) {
-    throw 'A conta informada na janela nao corresponde a conta de servico.'
+# Sem terminal (RMM, tarefa agendada): a senha vem de ALLOY_PASSWORD e a conta
+# e a sugerida pelo perfil. A variavel e apagada do processo logo apos a leitura
+# e nunca vai para a linha de comando (que aparece em logs e no historico).
+$envPassword = [Environment]::GetEnvironmentVariable('ALLOY_PASSWORD', 'Process')
+[Environment]::SetEnvironmentVariable('ALLOY_PASSWORD', $null, 'Process')
+$nonInteractive = [Console]::IsInputRedirected -or -not [Environment]::UserInteractive -or
+    ([Environment]::GetCommandLineArgs() -match '^-noni')
+if ($envPassword) {
+    $username = $suggested
+    Write-Host "Senha recebida por ALLOY_PASSWORD; conta: $username"
+    $securePassword = ConvertTo-SecureString -String $envPassword -AsPlainText -Force
+    $envPassword = $null
+} elseif ($nonInteractive) {
+    throw 'Sem terminal interativo: defina a variavel de ambiente ALLOY_PASSWORD com a senha de aplicativo. Nenhum arquivo alterado.'
+} else {
+    $username = (Read-Host "Conta de servico [$suggested]").Trim().ToLowerInvariant()
+    if (-not $username) { $username = $suggested }
+    # Get-Credential utiliza um campo de senha nativo no Windows PowerShell,
+    # permitindo colar a senha sem expor o conteudo no console.
+    $dialog = Get-Credential -UserName $username -Message 'Informe a senha de aplicativo do Alloy'
+    if ($null -eq $dialog) { throw 'Operacao cancelada.' }
+    if ($dialog.UserName -cne $username) {
+        throw 'A conta informada na janela nao corresponde a conta de servico.'
+    }
+    $securePassword = $dialog.Password
 }
-$securePassword = $dialog.Password
 $bstr = [IntPtr]::Zero
 $password = $null
 try {
