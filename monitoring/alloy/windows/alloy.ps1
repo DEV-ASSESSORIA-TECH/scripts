@@ -89,6 +89,14 @@ foreach ($module in $Modules) {
     }
 }
 if (-not $Ref -and $env:ALLOY_REF) { $Ref = $env:ALLOY_REF }
+# Este script roda no processo de quem o chamou (comando do README, Invoke-Tool):
+# as variaveis abaixo sao restauradas no final para nao vazar para a sessao
+# (um ALLOY_REF com o commit faria a proxima execucao acompanhar o commit fixo).
+$SavedEnv = @{}
+foreach ($name in @('ALLOY_REF', 'ALLOYCTL_MODE', 'ALLOYCTL_REF', 'ALLOYCTL_STATUS')) {
+    $SavedEnv[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+}
+$env:ALLOYCTL_STATUS = $null
 # Argumentos recebidos, sem Ref/NoUpdate/Elevated (tratados aqui).
 $PassArgs = @{}
 foreach ($key in $PSBoundParameters.Keys) {
@@ -133,6 +141,29 @@ $ToolCore = @('alloy.ps1', 'lib/Common.ps1', 'lib/State.ps1', 'lib/Ui.ps1')
 
 function Write-ToolLog([string]$Text) { Write-Host "[alloyctl] $Text" }
 function Write-ToolWarn([string]$Text) { Write-Host "[alloyctl] AVISO: $Text" -ForegroundColor Yellow }
+
+# Historico de instalacoes, atualizacoes e falhas do alloyctl (14 dias).
+# Nunca interrompe a execucao.
+$ToolLogDir = Join-Path $env:ProgramData 'GrafanaLabs\Alloy\logs'
+$ToolLogFile = Join-Path $ToolLogDir ('alloyctl-' + (Get-Date -Format 'yyyyMMdd') + '.log')
+function Write-ToolFileLog([string]$Text) {
+    try {
+        if (-not (Test-Path -LiteralPath $ToolLogDir)) { New-Item -ItemType Directory -Path $ToolLogDir -Force | Out-Null }
+        $line = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + '  ' + $Text + "`r`n"
+        [IO.File]::AppendAllText($ToolLogFile, $line, (New-Object System.Text.UTF8Encoding($false)))
+        Get-ChildItem -LiteralPath $ToolLogDir -Filter 'alloyctl-*.log' -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -lt (Get-Date).AddDays(-14) } |
+            Remove-Item -Force -ErrorAction SilentlyContinue
+    } catch { }
+}
+
+# Mensagem mais interna de uma excecao (AggregateException/HttpRequestException
+# escondem o motivo real, ex.: nome nao resolvido, conexao recusada).
+function Get-ToolErrorText($Exception) {
+    $current = $Exception
+    while ($current.InnerException) { $current = $current.InnerException }
+    return $current.Message
+}
 function Test-ToolRef([string]$Value) { ($Value -match '^[A-Za-z0-9][A-Za-z0-9._/-]*$') -and -not $Value.Contains('..') }
 
 function Get-ToolHttp {
@@ -146,19 +177,35 @@ function Get-ToolHttp {
     return $script:ToolHttp
 }
 
-# Commit atual de uma branch/tag (uma requisicao a API do GitHub); $null se falhar.
+# Commit atual de uma branch/tag (uma requisicao a API do GitHub). Em falha
+# devolve $null e deixa o motivo em $script:ToolError.
 function Resolve-ToolSha([string]$Value) {
+    $script:ToolError = $null
     try {
+        # Get-ToolHttp primeiro: ele carrega System.Net.Http, que o Windows
+        # PowerShell 5.1 nao carrega sozinho (sem isso o tipo abaixo nao existe).
+        $http = Get-ToolHttp
         $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get,
             "https://api.github.com/repos/$ToolRepo/commits/$Value")
         [void]$request.Headers.TryAddWithoutValidation('Accept', 'application/vnd.github.sha')
-        $response = (Get-ToolHttp).SendAsync($request).GetAwaiter().GetResult()
+        $response = $http.SendAsync($request).GetAwaiter().GetResult()
         try {
-            if (-not $response.IsSuccessStatusCode) { return $null }
+            $code = [int]$response.StatusCode
+            if (-not $response.IsSuccessStatusCode) {
+                $script:ToolError = switch ($code) {
+                    { $_ -in 404, 422 } { "ref '$Value' nao existe no repositorio (HTTP $code)" }
+                    { $_ -in 403, 429 } { "GitHub recusou a consulta (HTTP $code): limite da API (60/h por IP) ou bloqueio de rede" }
+                    default { "GitHub respondeu HTTP $code" }
+                }
+                return $null
+            }
             $sha = $response.Content.ReadAsStringAsync().GetAwaiter().GetResult().Trim()
         } finally { $response.Dispose() }
         if ($sha -cmatch '^[0-9a-f]{40}$') { return $sha }
-    } catch { }
+        $script:ToolError = 'resposta inesperada da API do GitHub'
+    } catch {
+        $script:ToolError = "falha ao consultar o GitHub: $(Get-ToolErrorText $_.Exception)"
+    }
     return $null
 }
 
@@ -186,6 +233,7 @@ public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, UIntPtr wP
 # (descarta os arquivos sob demanda da versao anterior). O PowerShell ja leu
 # o script em execucao: renomear a pasta nao o afeta.
 function Install-Tool([string]$TrackedRef, [string]$Sha) {
+    $script:ToolError = $null
     $parent = Split-Path -Parent $ToolDir
     if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
     $stage = $ToolDir + '.new-' + [guid]::NewGuid().ToString('N')
@@ -220,7 +268,7 @@ function Install-Tool([string]$TrackedRef, [string]$Sha) {
         if ($old -and -not (Test-Path -LiteralPath $ToolDir) -and (Test-Path -LiteralPath $old)) {
             Rename-Item -LiteralPath $old -NewName (Split-Path -Leaf $ToolDir) -ErrorAction SilentlyContinue
         }
-        Write-ToolWarn "falha ao instalar o alloyctl: $($_.Exception.Message)"
+        $script:ToolError = "falha ao instalar em ${ToolDir}: $(Get-ToolErrorText $_.Exception)"
         return $false
     }
     if ($old) { Remove-Item -LiteralPath $old -Recurse -Force -ErrorAction SilentlyContinue }
@@ -252,12 +300,32 @@ if ($toolMode -eq 'bootstrap') {
     $sha = Resolve-ToolSha $tracked
     if ($sha -and (Install-Tool $tracked $sha)) {
         if ($first) {
+            Write-ToolFileLog "instalado: $tracked @ $($sha.Substring(0, 7))"
             Write-ToolLog "comando instalado em $ToolDir (acompanha $tracked). Em um novo terminal, use: alloyctl"
+        } else {
+            Write-ToolFileLog "atualizado pelo comando do README: $tracked @ $($sha.Substring(0, 7))"
         }
         Invoke-Tool
         return
     }
-    Write-ToolWarn 'nao foi possivel instalar o alloyctl; seguindo com arquivos temporarios.'
+    Write-ToolFileLog "FALHA ao instalar ($tracked): $script:ToolError"
+    # Interativo: o motivo fica na tela e a decisao e de quem executa.
+    # Automacao (sem terminal): segue com arquivos temporarios, com aviso.
+    if ([Console]::IsInputRedirected) {
+        Write-ToolWarn "nao foi possivel instalar o alloyctl ($script:ToolError); seguindo com arquivos temporarios."
+    } else {
+        Write-Host ''
+        Write-Host '  ALLOYCTL NAO INSTALADO' -ForegroundColor Red
+        Write-Host "  Motivo: $script:ToolError"
+        Write-Host "  Log:    $ToolLogFile"
+        Write-Host ''
+        Write-Host '  Sem o alloyctl, esta execucao usa arquivos temporarios; o menu'
+        Write-Host '  funciona, mas o comando alloyctl nao fica disponivel.'
+        Write-Host ''
+        $answer = (Read-Host '  Continuar sem o alloyctl? [s/N]').Trim()
+        if ($answer -notmatch '^(s|sim|y|yes)$') { Write-Host '  Cancelado.'; exit 1 }
+    }
+    $env:ALLOYCTL_STATUS = "nao instalado: $script:ToolError"
 } elseif ($toolMode -eq 'installed') {
     $tracked = 'main'
     try { $tracked = ([IO.File]::ReadAllText((Join-Path $ToolDir 'ref'))).Trim() } catch { }
@@ -271,15 +339,19 @@ if ($toolMode -eq 'bootstrap') {
     if ($Ref -and $Ref -ne $tracked) { $wanted = $Ref; $force = $true }
     if (-not $NoUpdate -or $force) {
         $sha = Resolve-ToolSha $wanted
-        if (-not $sha) {
-            Write-ToolWarn "sem atualizacao (GitHub inacessivel ou ref '$wanted' inexistente); usando $tracked @ $short."
-        } elseif ($sha -ne $version -or $force) {
+        if ($sha -and ($sha -ne $version -or $force)) {
             if (Install-Tool $wanted $sha) {
+                Write-ToolFileLog "atualizado: $short -> $($sha.Substring(0, 7)) ($wanted)"
                 Write-ToolLog "atualizado: $short -> $($sha.Substring(0, 7)) ($wanted)"
                 Invoke-Tool
                 return
             }
-            Write-ToolWarn "falha ao atualizar; usando a versao instalada ($tracked @ $short)."
+        }
+        if ($script:ToolError) {
+            # A versao instalada continua valendo; o motivo aparece no cabecalho.
+            Write-ToolFileLog "sem atualizacao ($wanted): $script:ToolError"
+            Write-ToolWarn "sem atualizacao ($script:ToolError); usando $tracked @ $short. Log: $ToolLogFile"
+            $env:ALLOYCTL_STATUS = "sem atualizacao: $script:ToolError"
         }
     }
     if ($version -cnotmatch '^[0-9a-f]{40}$') { throw "$ToolDir\version invalido; rode o comando do README." }
@@ -478,6 +550,7 @@ try {
 
     # Tela propria para a acao, resultado e "ultima acao" no cabecalho.
     function Invoke-Screen([string]$Title, [scriptblock]$Action) {
+        Stop-UiFrame   # acoes sempre consultam o estado atual
         Clear-UiScreen
         Write-UiSection $Title.ToUpperInvariant()
         Write-Host ''
@@ -498,12 +571,14 @@ try {
 
     function Show-HeartbeatMenu {
         while (Test-HeartbeatConfigured) {
+            Initialize-UiFrame
             Clear-UiScreen
             Show-AlloyHeader
             Write-UiColumns 'HEARTBEAT' 'White' '' ''
             Write-UiColumns ' [1] Testar agora' '' ' [3] Remover' 'Red'
             Write-UiColumns ' [2] Reconfigurar' '' '' ''
             Write-UiRule '-'
+            Stop-UiFrame
             switch (Read-UiKey 'Tecle a opcao (0 volta)') {
                 '1' { Invoke-Screen 'Testar heartbeat' { Invoke-Heartbeat @{ Test = $true } } }
                 '2' { Invoke-Screen 'Reconfigurar heartbeat' { Invoke-Heartbeat } }
@@ -522,11 +597,13 @@ try {
 
     function Show-ModulesMenu {
         $sqlPresent = Test-SqlAnywherePresent
+        $vmmsPresent = $null -ne (Get-Service -Name vmms -ErrorAction SilentlyContinue)
         while ($true) {
+            Initialize-UiFrame
             $colorH = ''
             if (Test-HyperVModule) { $labelH = 'Desativar Hyper-V' } else {
                 $labelH = 'Ativar Hyper-V'
-                if (-not (Get-Service -Name vmms -ErrorAction SilentlyContinue)) { $labelH += ' (ausente)'; $colorH = 'DarkGray' }
+                if (-not $vmmsPresent) { $labelH += ' (ausente)'; $colorH = 'DarkGray' }
             }
             $colorS = ''
             $sqlActive = Test-SqlAnywhereModule
@@ -542,6 +619,7 @@ try {
             Write-UiColumns " [1] $labelH" $colorH ' [3] Reconfigurar SQL Anywhere' $color3
             Write-UiColumns " [2] $labelS" $colorS '' ''
             Write-UiRule '-'
+            Stop-UiFrame
             switch (Read-UiKey 'Tecle a opcao (0 volta)') {
                 '1' { Invoke-Screen $labelH { Invoke-ToggleModule 'hyperv' } }
                 '2' { Invoke-Screen $labelS { Invoke-ToggleModule 'sqlanywhere' } }
@@ -553,6 +631,7 @@ try {
 
     function Show-Menu {
         while ($true) {
+            Initialize-UiFrame
             $installed = Test-AlloyInstalled
             $default = ''
             if (-not $installed -or -not (Test-AlloyRunning)) { $default = '1' }
@@ -564,6 +643,9 @@ try {
             $modulesActive = (Test-HyperVModule) -or (Test-SqlAnywhereModule)
             $label2 = 'Modulos opcionais'; $color2 = ''
             if ($estacao -and -not $modulesActive) { $label2 = 'Modulos (so servidor)'; $color2 = 'DarkGray' }
+            $label9 = if (Test-HeartbeatConfigured) { 'Heartbeat' } else { 'Configurar heartbeat' }
+            $color9 = ''
+            if ($estacao -and -not (Test-HeartbeatConfigured)) { $label9 = 'Heartbeat (so servidor)'; $color9 = 'DarkGray' }
 
             Clear-UiScreen
             Show-AlloyHeader
@@ -573,13 +655,11 @@ try {
             Write-UiColumns ' [3] Atualizar Alloy' '' '' ''
             Write-Host ''
             Write-UiColumns 'DIAGNOSTICO' 'White' 'REMOCAO' 'White'
-            $label9 = if (Test-HeartbeatConfigured) { 'Heartbeat' } else { 'Configurar heartbeat' }
-            $color9 = ''
-            if ($estacao -and -not (Test-HeartbeatConfigured)) { $label9 = 'Heartbeat (so servidor)'; $color9 = 'DarkGray' }
             Write-UiColumns ' [6] Ver diagnostico' '' ' [7] Desinstalar' 'Red'
             Write-UiColumns " [9] $label9" $color9 ' [8] Limpeza completa' 'Red'
             Write-UiRule '-'
             $prompt = if ($default) { "Tecle a opcao (Enter = $default, 0 sai)" } else { 'Tecle a opcao (0 sai)' }
+            Stop-UiFrame
             $choice = Read-UiKey $prompt
             if ($choice -eq '') { $choice = $default }
             switch ($choice) {
@@ -655,6 +735,8 @@ try {
 } finally {
     if ($script:HttpClient) { $script:HttpClient.Dispose() }
     if ($script:ToolHttp) { $script:ToolHttp.Dispose() }
+    if ($script:ReadyClient) { $script:ReadyClient.Dispose() }
+    foreach ($name in $SavedEnv.Keys) { [Environment]::SetEnvironmentVariable($name, $SavedEnv[$name], 'Process') }
     if ($workDir) { Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue }
     if ($Elevated -and -not [Console]::IsInputRedirected) {
         Write-Host ''

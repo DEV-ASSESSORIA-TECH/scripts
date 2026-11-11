@@ -68,6 +68,7 @@ while (($#)); do
   shift
 done
 [[ -z $ref_arg && -n ${ALLOY_REF:-} ]] && ref_arg=$ALLOY_REF
+unset ALLOYCTL_STATUS
 
 # Sem root: reexecuta com sudo (o caminho real, nao o link do alloyctl).
 self=$(readlink -f -- "${BASH_SOURCE[0]}")
@@ -90,37 +91,81 @@ TOOL_UA=AssessoriaTech-Alloy-Installer/1.0
 # Nucleo baixado a cada versao; o resto vem sob demanda (fetch).
 TOOL_CORE=(alloy.sh lib/common.sh lib/state.sh lib/ui.sh)
 
+TOOL_LOG=/var/log/alloyctl.log
+TOOL_ERROR=''      # motivo da ultima falha (resolve_sha/install_tool)
+RESOLVED_SHA=''
+
 tool_log() { printf '[alloyctl] %s\n' "$*"; }
 tool_warn() { printf '[alloyctl] AVISO: %s\n' "$*" >&2; }
 valid_ref() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && $1 != *..* ]]; }
 
-# Commit atual de uma branch/tag (uma requisicao a API do GitHub).
+# Historico de instalacoes, atualizacoes e falhas do alloyctl (limitado a
+# ~2000 linhas). Nunca interrompe a execucao.
+tool_filelog() {
+  {
+    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >>"$TOOL_LOG"
+    if (($(wc -l <"$TOOL_LOG") > 4000)); then
+      tail -n 2000 "$TOOL_LOG" >"$TOOL_LOG.tmp" && mv -f -- "$TOOL_LOG.tmp" "$TOOL_LOG"
+    fi
+  } 2>/dev/null || true
+}
+
+# Primeira linha de erro do curl, sem o prefixo "curl: (N) ".
+curl_error() { sed -n '/./{s/^curl: ([0-9]*) //;p;q;}' "$1" 2>/dev/null; }
+
+# Commit atual de uma branch/tag em RESOLVED_SHA (uma requisicao a API do
+# GitHub). Em falha, o motivo fica em TOOL_ERROR. Sem subshell, para que as
+# variaveis cheguem a quem chamou.
 resolve_sha() {
-  local sha
-  sha=$(curl -fsS --proto '=https' --connect-timeout 10 --max-time 20 -A "$TOOL_UA" \
-    -H 'Accept: application/vnd.github.sha' "$TOOL_API/$1" 2>/dev/null) || return 1
-  [[ $sha =~ ^[0-9a-f]{40}$ ]] || return 1
-  printf '%s' "$sha"
+  local out code body errf
+  RESOLVED_SHA='' TOOL_ERROR=''
+  errf=$(mktemp)
+  if ! out=$(curl -sS --proto '=https' --connect-timeout 10 --max-time 20 -A "$TOOL_UA" \
+      -H 'Accept: application/vnd.github.sha' -w '\n%{http_code}' "$TOOL_API/$1" 2>"$errf"); then
+    TOOL_ERROR="falha ao consultar o GitHub: $(curl_error "$errf")"
+    rm -f -- "$errf"
+    return 1
+  fi
+  rm -f -- "$errf"
+  code=${out##*$'\n'}
+  body=${out%$'\n'*}
+  case "$code" in
+    200) ;;
+    404|422) TOOL_ERROR="ref '$1' nao existe no repositorio (HTTP $code)"; return 1 ;;
+    403|429) TOOL_ERROR="GitHub recusou a consulta (HTTP $code): limite da API (60/h por IP) ou bloqueio de rede"; return 1 ;;
+    *) TOOL_ERROR="GitHub respondeu HTTP $code"; return 1 ;;
+  esac
+  [[ $body =~ ^[0-9a-f]{40}$ ]] || { TOOL_ERROR='resposta inesperada da API do GitHub'; return 1; }
+  RESOLVED_SHA=$body
 }
 
 # install_tool REF SHA: baixa o nucleo do commit, troca o diretorio inteiro
 # (descarta os arquivos sob demanda da versao anterior) e cria o comando.
 # O bash continua lendo o script em execucao pelo descritor ja aberto.
 install_tool() {
-  local ref=$1 sha=$2 stage old='' name args=()
-  mkdir -p -- "$(dirname -- "$TOOL_DIR")"
-  stage=$(mktemp -d "$TOOL_DIR.new.XXXXXX") || return 1
+  local ref=$1 sha=$2 stage old='' name args=() errf
+  TOOL_ERROR=''
+  if ! mkdir -p -- "$(dirname -- "$TOOL_DIR")" || ! stage=$(mktemp -d "$TOOL_DIR.new.XXXXXX" 2>/dev/null); then
+    TOOL_ERROR="sem permissao para criar $TOOL_DIR"
+    return 1
+  fi
   for name in "${TOOL_CORE[@]}"; do
     mkdir -p -- "$stage/$(dirname -- "$name")"
     args+=(-o "$stage/$name" "$TOOL_RAW/$sha/$TOOL_REMOTE_DIR/$name")
   done
-  if ! curl -fsSL --proto '=https' --fail-early --connect-timeout 10 --retry 2 -A "$TOOL_UA" "${args[@]}"; then
+  errf=$(mktemp)
+  if ! curl -fsSL --proto '=https' --fail-early --connect-timeout 10 --retry 2 -A "$TOOL_UA" "${args[@]}" 2>"$errf"; then
+    TOOL_ERROR="falha ao baixar o alloyctl (${sha:0:7}): $(curl_error "$errf")"
+    rm -f -- "$errf"; rm -rf -- "$stage"; return 1
+  fi
+  rm -f -- "$errf"
+  for name in "${TOOL_CORE[@]}"; do
+    [[ -s $stage/$name ]] || { TOOL_ERROR="download vazio: $name"; rm -rf -- "$stage"; return 1; }
+  done
+  if ! bash -n "$stage/alloy.sh" 2>/dev/null; then
+    TOOL_ERROR="alloy.sh de ${sha:0:7} com erro de sintaxe"
     rm -rf -- "$stage"; return 1
   fi
-  for name in "${TOOL_CORE[@]}"; do
-    [[ -s $stage/$name ]] || { rm -rf -- "$stage"; return 1; }
-  done
-  bash -n "$stage/alloy.sh" || { rm -rf -- "$stage"; return 1; }
   printf '%s\n' "$ref" >"$stage/ref"
   printf '%s\n' "$sha" >"$stage/version"
   chown -R root:root -- "$stage"
@@ -156,13 +201,30 @@ case "$mode" in
     # Comando do README: instala (ou atualiza) o alloyctl e segue por ele.
     ref=${ref_arg:-main}
     first=true; [[ -x $TOOL_DIR/alloy.sh ]] && first=false
-    if sha=$(resolve_sha "$ref") && install_tool "$ref" "$sha"; then
+    if resolve_sha "$ref" && install_tool "$ref" "$RESOLVED_SHA"; then
       if [[ $first == true ]]; then
+        tool_filelog "instalado: $ref @ ${RESOLVED_SHA:0:7}"
         tool_log "comando instalado: $TOOL_BIN (acompanha $ref). Daqui em diante, use: alloyctl"
+      else
+        tool_filelog "atualizado pelo comando do README: $ref @ ${RESOLVED_SHA:0:7}"
       fi
       exec_tool
     fi
-    tool_warn 'nao foi possivel instalar o alloyctl; seguindo com arquivos temporarios.'
+    tool_filelog "FALHA ao instalar ($ref): $TOOL_ERROR"
+    # Interativo: o motivo fica na tela e a decisao e de quem executa.
+    # Automacao (sem terminal): segue com arquivos temporarios, com aviso.
+    if [[ -t 0 && -t 1 ]]; then
+      printf '\n  \e[1;31mALLOYCTL NAO INSTALADO\e[0m\n'
+      printf '  Motivo: %s\n' "$TOOL_ERROR"
+      printf '  Log:    %s\n\n' "$TOOL_LOG"
+      printf '  Sem o alloyctl, esta execucao usa arquivos temporarios; o menu\n'
+      printf '  funciona, mas o comando alloyctl nao fica disponivel.\n\n'
+      read -r -p '  Continuar sem o alloyctl? [s/N]: ' answer || answer=''
+      [[ $answer =~ ^([sS]|[sS][iI][mM]|[yY]|[yY][eE][sS])$ ]] || { printf '  Cancelado.\n'; exit 1; }
+    else
+      tool_warn "nao foi possivel instalar o alloyctl ($TOOL_ERROR); seguindo com arquivos temporarios."
+    fi
+    export ALLOYCTL_STATUS="nao instalado: $TOOL_ERROR"
     ;;
   installed)
     tracked=$(cat -- "$TOOL_DIR/ref" 2>/dev/null) || tracked=main
@@ -172,16 +234,21 @@ case "$mode" in
     wanted=$tracked force=false
     if [[ -n $ref_arg && $ref_arg != "$tracked" ]]; then wanted=$ref_arg; force=true; fi
     if [[ $no_update != true || $force == true ]]; then
-      if sha=$(resolve_sha "$wanted"); then
+      if resolve_sha "$wanted"; then
+        sha=$RESOLVED_SHA
         if [[ $sha != "$version" || $force == true ]]; then
           if install_tool "$wanted" "$sha"; then
+            tool_filelog "atualizado: ${version:0:7} -> ${sha:0:7} ($wanted)"
             tool_log "atualizado: ${version:0:7} -> ${sha:0:7} ($wanted)"
             exec_tool
           fi
-          tool_warn "falha ao atualizar; usando a versao instalada ($tracked @ ${version:0:7})."
         fi
-      else
-        tool_warn "sem atualizacao (GitHub inacessivel ou ref '$wanted' inexistente); usando $tracked @ ${version:0:7}."
+      fi
+      if [[ -n $TOOL_ERROR ]]; then
+        # A versao instalada continua valendo; o motivo aparece no cabecalho.
+        tool_filelog "sem atualizacao ($wanted): $TOOL_ERROR"
+        tool_warn "sem atualizacao ($TOOL_ERROR); usando $tracked @ ${version:0:7}. Log: $TOOL_LOG"
+        export ALLOYCTL_STATUS="sem atualizacao: $TOOL_ERROR"
       fi
     fi
     ;;
@@ -363,9 +430,13 @@ view_screen() {
 }
 
 heartbeat_menu() {
+  local frame
   while heartbeat_configured; do
+    # Estado calculado antes de limpar a tela: sem tela em branco nem
+    # desenho em pedacos enquanto systemctl/dpkg/curl respondem.
+    frame=$(print_header)
     ui_clear
-    print_header
+    printf '%s\n' "$frame"
     ui_columns 'HEARTBEAT' "$C_BOLD" '' ''
     ui_columns ' [1] Testar agora' '' ' [3] Remover' "$C_ERR"
     ui_columns ' [2] Reconfigurar' '' '' ''
@@ -385,7 +456,7 @@ heartbeat_menu() {
 }
 
 menu() {
-  local default label1 label2 color2 docker_target label5 label9 prompt
+  local default label1 label2 color2 docker_target label5 label9 prompt frame
   while :; do
     default=''
     if ! alloy_installed || ! service_active; then default=1; fi
@@ -399,8 +470,11 @@ menu() {
     fi
     if credential_present; then label5='Rotacionar'; else label5='Configurar'; fi
 
+    # Estado calculado antes de limpar a tela: sem tela em branco nem
+    # desenho em pedacos enquanto systemctl/dpkg/curl respondem.
+    frame=$(print_header)
     ui_clear
-    print_header
+    printf '%s\n' "$frame"
     ui_columns 'INSTALACAO' "$C_BOLD" 'CREDENCIAL' "$C_BOLD"
     ui_columns " [1] $label1" "${default:+$C_OK}" ' [4] Testar' ''
     ui_columns " [2] $label2" "$color2" " [5] $label5" ''
