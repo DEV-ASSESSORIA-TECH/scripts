@@ -18,6 +18,7 @@ function Test-CredentialPresent {
     return ($item.Length -gt 0) -and -not ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)
 }
 function Test-HyperVModule { Test-Path -LiteralPath $HyperVFile -PathType Leaf }
+function Test-SqlAnywhereModule { Test-Path -LiteralPath $SqlAnywhereFile -PathType Leaf }
 function Test-HeartbeatConfigured {
     (Test-Path -LiteralPath $HeartbeatUrlFile -PathType Leaf) -or ($null -ne (Get-HeartbeatTask))
 }
@@ -131,6 +132,7 @@ function Show-AlloyHeader {
     }
     $modules = 'Windows'
     if (Test-HyperVModule) { $modules += ' + Hyper-V' }
+    if (Test-SqlAnywhereModule) { $modules += ' + SQL Anywhere' }
     Write-UiRow 'Modulos' 'none' $modules
     $heartbeat = Get-HeartbeatStatus
     if ($heartbeat) { Write-UiRow 'Heartbeat' $heartbeat.Kind $heartbeat.Text }
@@ -218,6 +220,40 @@ function Show-InventoryDiagnostics {
     Write-UiRow 'Logs' 'none' "$LogDir (retencao 14 dias)"
 }
 
+# Tarefa agendada e ultimo arquivo gerado pelo coletor SQL Anywhere.
+function Show-SqlAnywhereDiagnostics {
+    Write-UiSection 'SQL ANYWHERE'
+    $task = Get-ScheduledTask -TaskPath $SqlTaskPath -TaskName $SqlTaskName -ErrorAction SilentlyContinue
+    if (-not $task) {
+        Write-UiRow 'Tarefa' 'err' 'ausente: use [1] Reaplicar configuracao'
+    } else {
+        $info = Get-ScheduledTaskInfo -InputObject $task -ErrorAction SilentlyContinue
+        $last = 'nunca executada'
+        if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) {
+            $last = 'ultima ' + $info.LastRunTime.ToString('dd/MM HH:mm:ss') + ', codigo ' + $info.LastTaskResult
+        }
+        $kind = 'ok'
+        if ([string]$task.State -eq 'Disabled') { $kind = 'err' }
+        elseif (-not $info -or $info.LastTaskResult -ne 0) { $kind = 'warn' }
+        Write-UiRow 'Tarefa' $kind ("$($task.State) - $last")
+    }
+    if (Test-Path -LiteralPath $SqlOutput -PathType Leaf) {
+        $item = Get-Item -LiteralPath $SqlOutput
+        $age = [int]((Get-Date) - $item.LastWriteTime).TotalSeconds
+        $content = [IO.File]::ReadAllLines($SqlOutput)
+        $ok = @($content | Where-Object { $_ -match '^sqlanywhere_collection_success 1$' }).Count -gt 0
+        $missing = ($content | Where-Object { $_ -like 'sqlanywhere_collection_missing_properties *' } | Select-Object -First 1) -replace '^\S+\s+', ''
+        $kind = if ($ok -and $age -lt 90) { 'ok' } elseif ($ok) { 'warn' } else { 'err' }
+        $text = if ($ok) { "coleta OK, atualizado ha ${age}s" } else { "ultima coleta falhou (ha ${age}s)" }
+        if ($ok -and $missing -and $missing -ne '0') { $text += ", $missing propriedade(s) sem valor"; $kind = 'warn' }
+        Write-UiRow 'Saida' $kind $text
+    } else {
+        Write-UiRow 'Saida' 'err' 'sqlanywhere.prom ausente'
+    }
+    Write-UiRow 'Config' 'none' "$SqlState (so SYSTEM e Administradores)"
+    Write-UiRow 'Logs' 'none' "$LogDir\sqlanywhere-collector-*.log (retencao 14 dias)"
+}
+
 # Tarefa, ultima execucao e linha enviada ao Loki pelo heartbeat.
 function Show-HeartbeatDiagnostics {
     Write-UiSection 'HEARTBEAT (UPTIME KUMA + LOKI)'
@@ -291,6 +327,7 @@ function Show-AlloyDiagnostics {
     }
 
     if (Test-HyperVModule) { Show-InventoryDiagnostics }
+    if (Test-SqlAnywhereModule) { Show-SqlAnywhereDiagnostics }
     if (Test-HeartbeatConfigured) { Show-HeartbeatDiagnostics }
 
     Write-UiSection 'CONECTIVIDADE'
@@ -304,6 +341,9 @@ function Show-AlloyDiagnostics {
         Write-Query 'Hyper-V' $GrafanaDsMetrics "up{job=`"integrations/hyperv`",host=`"$hostName`"}"
         Write-Query 'Inventario' $GrafanaDsMetrics "hypervisor_inventory_success{job=`"integrations/hypervisor`",host=`"$hostName`"}"
         Write-Query 'Logs Hyper-V' $GrafanaDsLogs "{job=`"hyperv-eventlog`",host=`"$hostName`"}"
+    }
+    if (Test-SqlAnywhereModule) {
+        Write-Query 'SQL Anywhere' $GrafanaDsMetrics "sqlanywhere_collection_success{job=`"integrations/sqlanywhere`",host=`"$hostName`"}"
     }
     if (Test-HeartbeatConfigured) {
         Write-Query 'Heartbeat' $GrafanaDsLogs "{job=`"alloy-heartbeat`",host=`"$hostName`"} | logfmt"

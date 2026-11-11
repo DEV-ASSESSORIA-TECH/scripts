@@ -66,11 +66,11 @@ operação precisa. Executado a partir de um clone, usa os arquivos locais.
 
 | Linux (`alloy.sh`) | Windows (`alloy.ps1`) | Ação |
 |--------------------|-----------------------|------|
-| `install [--modules docker\|none] [--upgrade]` | `install [-Modules hyperv\|none] [-Upgrade]` | credencial (se ausente) + instalação |
+| `install [--modules docker\|none] [--upgrade]` | `install [-Modules hyperv,sqlanywhere\|none] [-Upgrade]` | credencial (se ausente) + instalação |
 | `credentials` | `credentials` | só o setup da credencial |
 | `check` | `check` | testa a credencial gravada, sem alterar nada |
 | `rotate` | `rotate` | troca a credencial e reinicia o Alloy |
-| `modules docker\|none` | `modules hyperv\|none` | ativa/desativa o módulo opcional |
+| `modules docker\|none` | `modules hyperv,sqlanywhere\|none` | define os módulos opcionais (os não listados são desativados) |
 | `upgrade` | `upgrade` | atualiza o Alloy |
 | `status` | `status` | diagnóstico |
 | `uninstall [--yes]` | `uninstall [-Yes]` | remove o Alloy, mantendo credencial e configuração |
@@ -93,10 +93,22 @@ operação precisa. Executado a partir de um clone, usa os arquivos locais.
 | `install.*` | instala o Alloy e aplica a configuração, com validação e rollback |
 | `uninstall.*` | desinstalação e limpeza completa |
 | `config.alloy` | configuração base do sistema |
-| `docker.alloy` / `hyperv.alloy` | módulos opcionais |
+| `docker.alloy` / `hyperv.alloy` / `sqlanywhere.alloy` | módulos opcionais |
 | `hypervisor-inventory.ps1` | inventário de VMs do módulo Hyper-V (tarefa agendada) |
+| `sqlanywhere-collector.ps1` | coletor do módulo SQL Anywhere (tarefa agendada) |
 | `heartbeat-setup.*` | configura, testa e remove o heartbeat |
 | `heartbeat.*` | heartbeat executado a cada minuto (tarefa agendada / timer systemd) |
+
+## Módulos opcionais (Windows)
+
+Na instalação (`-Modules auto`, padrão), os módulos já ativos são mantidos e os
+detectados são oferecidos (só em terminal interativo). `-Modules` com uma lista
+(`hyperv`, `sqlanywhere` ou `hyperv,sqlanywhere`) define o conjunto completo:
+os não listados são desativados; `none` desativa todos. No menu, **[2] Módulos
+opcionais** liga e desliga cada um sem afetar o outro.
+
+Cada módulo com coletor próprio grava em um subdiretório de `textfile\` e o
+Alloy lê só esse subdiretório, em job próprio.
 
 ## Módulo Hyper-V
 
@@ -111,7 +123,7 @@ atualiza tudo, inclusive o inventário de VMs.
 | Logs | `hyperv.alloy`, job `hyperv-eventlog` | canais VMMS-Admin e Worker-Admin |
 
 O inventário roda a cada minuto, como SYSTEM, pela tarefa agendada
-`\GrafanaLabs\Alloy Hypervisor Inventory`, e grava `textfile\hypervisor.prom`,
+`\GrafanaLabs\Alloy Hypervisor Inventory`, e grava `textfile\hypervisor\hypervisor.prom`,
 lido pelo coletor `textfile` do Alloy (requer Alloy v1.11+). As métricas usam
 nomes neutros (`hypervisor_*`, com `platform="hyperv"`) para que outras
 plataformas possam publicar o mesmo formato.
@@ -122,13 +134,56 @@ Administradores):
 | Diretório | Conteúdo | Retenção |
 |-----------|----------|----------|
 | `scripts\` | script do inventário | substituído a cada reaplicação |
-| `textfile\` | `hypervisor.prom` | sobrescrito a cada execução |
+| `textfile\hypervisor\` | `hypervisor.prom` | sobrescrito a cada execução |
 | `data\hypervisor\` | `guests.json`: último hostname/SO conhecido de cada VM (VM desligada não informa) | VMs removidas saem na execução seguinte |
 | `logs\` | `hypervisor-inventory-AAAAMMDD.log`, uma linha por execução | 14 dias |
 
 Desativar o módulo remove a tarefa, o script, a saída, o cache e os logs do
 inventário. Desinstalar o Alloy remove a tarefa; a limpeza completa remove
-também os arquivos.
+também os arquivos. A reaplicação apaga o `textfile\hypervisor.prom` das
+versões anteriores, gravado na raiz do `textfile\`.
+
+## Módulo SQL Anywhere
+
+Para servidores com SAP SQL Anywhere 17. Detectado na instalação por serviço
+ou processo `dbsrv17.exe`/`dbeng17.exe`. Requer o driver ODBC
+`SQL Anywhere 17` de **64 bits** e um usuário SQL somente leitura: o coletor só
+executa `PROPERTY()` e `DB_PROPERTY()`. Na ativação, o instalador pede
+servidor (ENG), banco (DBN), usuário e senha, e **testa a conexão antes de
+gravar**. Para trocar esses dados: **[2] Módulos opcionais → [3] Reconfigurar
+SQL Anywhere** (ou `install.ps1 -ReconfigureSqlAnywhere`).
+
+| Parte | Onde | O que faz |
+|-------|------|-----------|
+| Coletor | `scripts\sqlanywhere-collector.ps1`, job `integrations/sqlanywhere` | conexões, requisições e cache do servidor; leituras, gravações, commits, rollbacks e checkpoints do banco |
+
+O coletor roda a cada 30 s, como SYSTEM, pela tarefa agendada
+`\GrafanaLabs\Alloy SQL Anywhere` (dois gatilhos de 1 min defasados em 30 s:
+o Agendador não repete em menos de 1 min), sem execuções simultâneas e com
+limite de 25 s. Conecta via ODBC local (`LINKS=SharedMemory,TCPIP(HOST=127.0.0.1)`)
+e grava `textfile\sqlanywhere\sqlanywhere.prom`. Suporta um par ENG/DBN por
+servidor.
+
+Métricas: `sqlanywhere_server_*` (`PROPERTY`) e `sqlanywhere_database_*`
+(`DB_PROPERTY`), com labels `server` e `database`; `sqlanywhere_info` traz a
+versão. Tamanhos de cache são convertidos de KB para bytes. A saúde da coleta
+fica em `sqlanywhere_up`, `sqlanywhere_collection_success`,
+`sqlanywhere_collection_missing_properties`, `_duration_seconds` e
+`_timestamp_seconds`. Propriedade sem valor numérico não gera série (nunca
+vira zero) e a lista vai para o log quando muda. Em falha, só as métricas de
+saúde são publicadas.
+
+| Diretório | Conteúdo | Retenção |
+|-----------|----------|----------|
+| `scripts\` | `sqlanywhere-collector.ps1` | substituído a cada reaplicação |
+| `textfile\sqlanywhere\` | `sqlanywhere.prom` | sobrescrito a cada execução |
+| `data\sqlanywhere\` | `config.json` (servidor, banco, usuário e `links`) e `password.dpapi` (senha cifrada com DPAPI da máquina) | mantidos ao desativar o módulo ou desinstalar; removidos na limpeza completa |
+| `logs\` | `sqlanywhere-collector-AAAAMMDD.log`: falhas e mudanças nas propriedades ausentes | 14 dias |
+
+Para usar outro protocolo ou porta, edite `links` no `config.json` (sintaxe do
+parâmetro `LINKS` do SQL Anywhere); o coletor relê o arquivo a cada execução. Desativar o módulo remove a
+tarefa, o script, a saída e os logs; a configuração fica para reativar sem
+digitar de novo.
 
 ## Heartbeat (Uptime Kuma + Loki)
 

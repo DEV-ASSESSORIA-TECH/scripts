@@ -34,14 +34,14 @@ prometheus.scrape "hyperv" {
 
 // Inventario das VMs (estado, convidado, discos e rede), gerado a cada minuto
 // pela tarefa agendada "\GrafanaLabs\Alloy Hypervisor Inventory"
-// (scripts\hypervisor-inventory.ps1) em textfile\hypervisor.prom.
+// (scripts\hypervisor-inventory.ps1) em textfile\hypervisor\hypervisor.prom.
 // Metricas neutras (hypervisor_*) em job proprio, para que outras plataformas
 // de virtualizacao possam publicar o mesmo formato no futuro.
 prometheus.exporter.windows "hypervisor" {
   enabled_collectors = ["textfile"]
 
   textfile {
-    directories = ["C:\\ProgramData\\GrafanaLabs\\Alloy\\textfile"]
+    directories = ["C:\\ProgramData\\GrafanaLabs\\Alloy\\textfile\\hypervisor"]
   }
 }
 

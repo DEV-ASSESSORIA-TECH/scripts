@@ -11,11 +11,12 @@ Baixa sob demanda, do mesmo ref, apenas os arquivos de cada operacao.
 
 Comandos:
   install      credencial (se ausente) + instalacao/reaplicacao
-               [-Modules auto|hyperv|none] [-Upgrade]
+               [-Modules auto|none|hyperv,sqlanywhere] [-Upgrade]
   credentials  apenas o setup da credencial
   check        testa a credencial gravada (OAuth2 + Loki), sem alterar nada
   rotate       substitui a credencial e reinicia o Alloy
-  modules      hyperv|none: ativa ou desativa o modulo Hyper-V
+  modules      hyperv|sqlanywhere|none: conjunto completo dos modulos
+               opcionais (separados por virgula; os nao listados saem)
   upgrade      atualiza o Alloy
   status       diagnostico (servico, eventos, conectividade, consultas)
   uninstall    remove o Alloy, mantendo credencial e configuracao [-Yes]
@@ -37,6 +38,9 @@ URL de push do Uptime Kuma (comando heartbeat, sem terminal interativo).
 
 .EXAMPLE
 .\alloy.ps1 modules hyperv
+
+.EXAMPLE
+.\alloy.ps1 modules hyperv,sqlanywhere
 #>
 [CmdletBinding()]
 param(
@@ -45,8 +49,8 @@ param(
                  'heartbeat', 'heartbeat-test', 'heartbeat-remove', 'help')]
     [string]$Command = '',
     [Parameter(Position = 1)]
-    [ValidateSet('auto', 'hyperv', 'none')]
-    [string]$Modules = 'auto',
+    [ValidateSet('auto', 'hyperv', 'sqlanywhere', 'none')]
+    [string[]]$Modules = @('auto'),
     [switch]$Upgrade,
     [switch]$Yes,
     [string]$Ref,
@@ -134,10 +138,28 @@ try {
         }
     }
 
-    function Invoke-Modules([string]$Selection) {
-        if ($Selection -notin @('hyperv', 'none')) { throw 'Use: modules hyperv|none' }
+    # Selection e o conjunto completo dos modulos opcionais desejados.
+    function Invoke-Modules([string[]]$Selection) {
+        if (-not $Selection -or $Selection -contains 'auto') {
+            throw 'Use: modules hyperv|sqlanywhere|none (varios separados por virgula).'
+        }
         if (-not (Test-CredentialPresent)) { throw 'Credencial ausente; execute a instalacao primeiro.' }
         Invoke-Installer @{ Modules = $Selection }
+    }
+
+    # Liga ou desliga um modulo preservando os demais.
+    function Invoke-ToggleModule([string]$Name) {
+        $set = @()
+        if (Test-HyperVModule) { $set += 'hyperv' }
+        if (Test-SqlAnywhereModule) { $set += 'sqlanywhere' }
+        if ($set -contains $Name) { $set = @($set | Where-Object { $_ -ne $Name }) } else { $set += $Name }
+        if ($set.Count -eq 0) { $set = @('none') }
+        Invoke-Modules $set
+    }
+
+    function Invoke-ReconfigureSqlAnywhere {
+        if (-not (Test-CredentialPresent)) { throw 'Credencial ausente; execute a instalacao primeiro.' }
+        Invoke-Installer @{ ReconfigureSqlAnywhere = $true }
     }
 
     function Invoke-Upgrade {
@@ -218,19 +240,50 @@ try {
         }
     }
 
+    function Test-SqlAnywherePresent {
+        if (@(Get-Process -Name dbsrv17, dbeng17 -ErrorAction SilentlyContinue).Count -gt 0) { return $true }
+        return @(Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue | Where-Object {
+            $_.PathName -match '(?i)\bdb(srv|eng)17\.exe\b'
+        }).Count -gt 0
+    }
+
+    function Show-ModulesMenu {
+        $sqlPresent = Test-SqlAnywherePresent
+        while ($true) {
+            $colorH = ''
+            if (Test-HyperVModule) { $labelH = 'Desativar Hyper-V' } else {
+                $labelH = 'Ativar Hyper-V'
+                if (-not (Get-Service -Name vmms -ErrorAction SilentlyContinue)) { $labelH += ' (ausente)'; $colorH = 'DarkGray' }
+            }
+            $colorS = ''
+            $sqlActive = Test-SqlAnywhereModule
+            if ($sqlActive) { $labelS = 'Desativar SQL Anywhere' } else {
+                $labelS = 'Ativar SQL Anywhere'
+                if (-not $sqlPresent) { $labelS += ' (ausente)'; $colorS = 'DarkGray' }
+            }
+            $color3 = if ($sqlActive) { '' } else { 'DarkGray' }
+
+            Clear-UiScreen
+            Show-AlloyHeader
+            Write-UiColumns 'MODULOS OPCIONAIS' 'White' '' ''
+            Write-UiColumns " [1] $labelH" $colorH ' [3] Reconfigurar SQL Anywhere' $color3
+            Write-UiColumns " [2] $labelS" $colorS '' ''
+            Write-UiRule '-'
+            switch (Read-UiKey 'Tecle a opcao (0 volta)') {
+                '1' { Invoke-Screen $labelH { Invoke-ToggleModule 'hyperv' } }
+                '2' { Invoke-Screen $labelS { Invoke-ToggleModule 'sqlanywhere' } }
+                '3' { if ($sqlActive) { Invoke-Screen 'Reconfigurar SQL Anywhere' { Invoke-ReconfigureSqlAnywhere } } }
+                { $_ -in @('0', 'q', 'Q', 'ESC') } { return }
+            }
+        }
+    }
+
     function Show-Menu {
         while ($true) {
             $installed = Test-AlloyInstalled
             $default = ''
             if (-not $installed -or -not (Test-AlloyRunning)) { $default = '1' }
             $label1 = if ($installed) { 'Reaplicar configuracao' } else { 'Instalar Alloy' }
-            $color2 = ''
-            if (Test-HyperVModule) {
-                $label2 = 'Desativar Hyper-V'; $hypervTarget = 'none'
-            } else {
-                $label2 = 'Ativar Hyper-V'; $hypervTarget = 'hyperv'
-                if (-not (Get-Service -Name vmms -ErrorAction SilentlyContinue)) { $label2 += ' (ausente)'; $color2 = 'DarkGray' }
-            }
             $label5 = if (Test-CredentialPresent) { 'Rotacionar' } else { 'Configurar' }
             $color1 = if ($default) { 'Green' } else { '' }
 
@@ -238,7 +291,7 @@ try {
             Show-AlloyHeader
             Write-UiColumns 'INSTALACAO' 'White' 'CREDENCIAL' 'White'
             Write-UiColumns " [1] $label1" $color1 ' [4] Testar' ''
-            Write-UiColumns " [2] $label2" $color2 " [5] $label5" ''
+            Write-UiColumns ' [2] Modulos opcionais' '' " [5] $label5" ''
             Write-UiColumns ' [3] Atualizar Alloy' '' '' ''
             Write-Host ''
             Write-UiColumns 'DIAGNOSTICO' 'White' 'REMOCAO' 'White'
@@ -251,7 +304,7 @@ try {
             if ($choice -eq '') { $choice = $default }
             switch ($choice) {
                 '1' { Invoke-Screen $label1 { Invoke-Install } }
-                '2' { Invoke-Screen $label2 { Invoke-Modules $hypervTarget } }
+                '2' { Show-ModulesMenu }
                 '3' { Invoke-Screen 'Atualizar Alloy' { Invoke-Upgrade } }
                 '4' { Invoke-Screen 'Testar credencial' { Invoke-Check } }
                 '5' {

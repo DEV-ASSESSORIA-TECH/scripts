@@ -1,0 +1,37 @@
+// Modulo opcional SAP SQL Anywhere 17 para hosts Windows.
+// Metricas geradas a cada 30 s pela tarefa agendada
+// "\GrafanaLabs\Alloy SQL Anywhere" (scripts\sqlanywhere-collector.ps1) em
+// textfile\sqlanywhere\sqlanywhere.prom, em job proprio. Requer Alloy v1.11+
+// (bloco textfile). O config.alloy principal fornece
+// prometheus.remote_write.central.
+
+prometheus.exporter.windows "sqlanywhere" {
+  enabled_collectors = ["textfile"]
+
+  textfile {
+    directories = ["C:\\ProgramData\\GrafanaLabs\\Alloy\\textfile\\sqlanywhere"]
+  }
+}
+
+discovery.relabel "sqlanywhere" {
+  targets = prometheus.exporter.windows.sqlanywhere.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "integrations/sqlanywhere"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = string.to_lower(constants.hostname)
+  }
+  rule {
+    target_label = "host"
+    replacement  = string.to_lower(constants.hostname)
+  }
+}
+
+prometheus.scrape "sqlanywhere" {
+  targets         = discovery.relabel.sqlanywhere.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
