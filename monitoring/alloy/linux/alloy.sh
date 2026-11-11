@@ -168,19 +168,20 @@ case "$mode" in
     tracked=$(cat -- "$TOOL_DIR/ref" 2>/dev/null) || tracked=main
     valid_ref "$tracked" || tracked=main
     version=$(cat -- "$TOOL_DIR/version" 2>/dev/null) || version=''
-    force=false
-    if [[ -n $ref_arg && $ref_arg != "$tracked" ]]; then tracked=$ref_arg; force=true; fi
+    # --ref diferente troca a branch acompanhada; so vale se a atualizacao der certo.
+    wanted=$tracked force=false
+    if [[ -n $ref_arg && $ref_arg != "$tracked" ]]; then wanted=$ref_arg; force=true; fi
     if [[ $no_update != true || $force == true ]]; then
-      if sha=$(resolve_sha "$tracked"); then
+      if sha=$(resolve_sha "$wanted"); then
         if [[ $sha != "$version" || $force == true ]]; then
-          if install_tool "$tracked" "$sha"; then
-            tool_log "atualizado: ${version:0:7} -> ${sha:0:7} ($tracked)"
+          if install_tool "$wanted" "$sha"; then
+            tool_log "atualizado: ${version:0:7} -> ${sha:0:7} ($wanted)"
             exec_tool
           fi
-          tool_warn "falha ao atualizar; usando a versao instalada (${version:0:7})."
+          tool_warn "falha ao atualizar; usando a versao instalada ($tracked @ ${version:0:7})."
         fi
       else
-        tool_warn "sem atualizacao (GitHub inacessivel ou ref '$tracked' inexistente); usando ${version:0:7}."
+        tool_warn "sem atualizacao (GitHub inacessivel ou ref '$wanted' inexistente); usando $tracked @ ${version:0:7}."
       fi
     fi
     ;;

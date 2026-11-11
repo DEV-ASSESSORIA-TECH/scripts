@@ -253,18 +253,22 @@ if ($toolMode -eq 'bootstrap') {
     if (-not (Test-ToolRef $tracked)) { $tracked = 'main' }
     $version = ''
     try { $version = ([IO.File]::ReadAllText((Join-Path $ToolDir 'version'))).Trim() } catch { }
+    # -Ref diferente troca a branch acompanhada; so vale se a atualizacao der certo.
+    $short = $version.Substring(0, [Math]::Min(7, $version.Length))
+    $wanted = $tracked
     $force = $false
-    if ($Ref -and $Ref -ne $tracked) { $tracked = $Ref; $force = $true }
+    if ($Ref -and $Ref -ne $tracked) { $wanted = $Ref; $force = $true }
     if (-not $NoUpdate -or $force) {
-        $sha = Resolve-ToolSha $tracked
+        $sha = Resolve-ToolSha $wanted
         if (-not $sha) {
-            Write-ToolWarn "sem atualizacao (GitHub inacessivel ou ref '$tracked' inexistente); usando $($version.Substring(0, [Math]::Min(7, $version.Length)))."
+            Write-ToolWarn "sem atualizacao (GitHub inacessivel ou ref '$wanted' inexistente); usando $tracked @ $short."
         } elseif ($sha -ne $version -or $force) {
-            if (Install-Tool $tracked $sha) {
-                Write-ToolLog "atualizado: $($version.Substring(0, [Math]::Min(7, $version.Length))) -> $($sha.Substring(0, 7)) ($tracked)"
+            if (Install-Tool $wanted $sha) {
+                Write-ToolLog "atualizado: $short -> $($sha.Substring(0, 7)) ($wanted)"
                 Invoke-Tool
                 return
             }
+            Write-ToolWarn "falha ao atualizar; usando a versao instalada ($tracked @ $short)."
         }
     }
     if ($version -cnotmatch '^[0-9a-f]{40}$') { throw "$ToolDir\version invalido; rode o comando do README." }
