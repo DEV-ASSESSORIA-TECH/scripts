@@ -344,7 +344,7 @@ SQL Anywhere** (ou `install.ps1 -ReconfigureSqlAnywhere`).
 
 | Parte | Onde | O que faz |
 |-------|------|-----------|
-| Coletor | `scripts\sqlanywhere-collector.ps1`, job `integrations/sqlanywhere` | conexões, requisições e cache do servidor; leituras, gravações, commits, rollbacks e checkpoints do banco |
+| Coletor | `scripts\sqlanywhere-collector.ps1`, job `integrations/sqlanywhere` | servidor: conexões, workers e fila, commits e rollbacks, thread deadlocks, CPU, início, cache (alocado, em uso, livre, sujo, panics) e memória de consulta; banco: leituras de cache e disco, gravações, flushes, checkpoints, locks, tamanho do arquivo e urgência de checkpoint/recuperação |
 
 O coletor roda a cada 30 s, como SYSTEM, pela tarefa agendada
 `\GrafanaLabs\Alloy SQL Anywhere` (dois gatilhos de 1 min defasados em 30 s:
@@ -355,7 +355,11 @@ servidor.
 
 Métricas: `sqlanywhere_server_*` (`PROPERTY`) e `sqlanywhere_database_*`
 (`DB_PROPERTY`), com labels `server` e `database`; `sqlanywhere_info` traz a
-versão. Tamanhos de cache são convertidos de KB para bytes. A saúde da coleta
+versão. Tamanhos de cache são convertidos de KB para bytes e contagens de páginas
+(cache em uso/livre, arquivo do banco) multiplicadas pelo `PageSize` do escopo.
+A propriedade `Commit` do banco conta flushes do cache de disco
+(`sqlanywhere_database_disk_flushes_total`); os COMMITs vêm do servidor
+(`sqlanywhere_server_commits_total`). `StartTime` vira `_start_time_seconds` (Unix). A saúde da coleta
 fica em `sqlanywhere_up`, `sqlanywhere_collection_success`,
 `sqlanywhere_collection_missing_properties`, `_duration_seconds` e
 `_timestamp_seconds`. Propriedade sem valor numérico não gera série (nunca

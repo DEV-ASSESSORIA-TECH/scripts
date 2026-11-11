@@ -49,26 +49,53 @@ $DefaultLinks = 'SharedMemory,TCPIP(HOST=127.0.0.1)'
 $Entropy = [Text.Encoding]::UTF8.GetBytes('AssessoriaTech-Alloy-SQLAnywhere')
 
 # Propriedades lidas. Scope: Server = PROPERTY(), Database = DB_PROPERTY() do
-# banco conectado. Scale converte KB em bytes. Nomes conforme a documentacao
-# do SQL Anywhere 17 (server/database properties).
+# banco conectado. Scale: numero (1024 converte KB em bytes), 'ServerPage' ou
+# 'DatabasePage' (multiplica pelo PageSize do escopo) ou 'DateTime' (data do
+# servidor convertida em Unix). Nomes e descricoes conforme a documentacao do
+# SQL Anywhere 17 ("List of Database Server Properties" e "List of Database
+# Properties"). Atencao: Commit de banco conta flushes do cache de disco, nao
+# COMMITs; os COMMITs sao a propriedade Commit do servidor.
 $Properties = @(
-    @{ Scope = 'Server';   Name = 'ConnCount';         Metric = 'sqlanywhere_server_connections';             Type = 'gauge';   Scale = 1;    Help = 'Conexoes abertas no servidor.' }
-    @{ Scope = 'Server';   Name = 'ActiveReq';         Metric = 'sqlanywhere_server_active_requests';         Type = 'gauge';   Scale = 1;    Help = 'Requisicoes em execucao agora.' }
-    @{ Scope = 'Server';   Name = 'UnschReq';          Metric = 'sqlanywhere_server_waiting_requests';        Type = 'gauge';   Scale = 1;    Help = 'Requisicoes aguardando uma thread de trabalho.' }
-    @{ Scope = 'Server';   Name = 'RequestsReceived';  Metric = 'sqlanywhere_server_requests_total';          Type = 'counter'; Scale = 1;    Help = 'Requisicoes recebidas pelo servidor desde o inicio.' }
-    @{ Scope = 'Server';   Name = 'CurrentCacheSize';  Metric = 'sqlanywhere_server_cache_size_bytes';        Type = 'gauge';   Scale = 1024; Help = 'Tamanho atual do cache.' }
-    @{ Scope = 'Server';   Name = 'MinCacheSize';      Metric = 'sqlanywhere_server_cache_min_bytes';         Type = 'gauge';   Scale = 1024; Help = 'Tamanho minimo configurado do cache.' }
-    @{ Scope = 'Server';   Name = 'MaxCacheSize';      Metric = 'sqlanywhere_server_cache_max_bytes';         Type = 'gauge';   Scale = 1024; Help = 'Tamanho maximo configurado do cache.' }
-    @{ Scope = 'Server';   Name = 'PeakCacheSize';     Metric = 'sqlanywhere_server_cache_peak_bytes';        Type = 'gauge';   Scale = 1024; Help = 'Maior tamanho do cache desde o inicio.' }
-    @{ Scope = 'Server';   Name = 'CacheReplacements'; Metric = 'sqlanywhere_server_cache_replacements_total'; Type = 'counter'; Scale = 1;    Help = 'Paginas substituidas no cache desde o inicio.' }
-    @{ Scope = 'Database'; Name = 'ConnCount';         Metric = 'sqlanywhere_database_connections';           Type = 'gauge';   Scale = 1;    Help = 'Conexoes abertas no banco.' }
-    @{ Scope = 'Database'; Name = 'CacheRead';         Metric = 'sqlanywhere_database_cache_reads_total';     Type = 'counter'; Scale = 1;    Help = 'Leituras de pagina no cache do banco.' }
-    @{ Scope = 'Database'; Name = 'CacheHits';         Metric = 'sqlanywhere_database_cache_hits_total';      Type = 'counter'; Scale = 1;    Help = 'Leituras de pagina atendidas pelo cache.' }
-    @{ Scope = 'Database'; Name = 'DiskRead';          Metric = 'sqlanywhere_database_disk_reads_total';      Type = 'counter'; Scale = 1;    Help = 'Paginas lidas do disco.' }
-    @{ Scope = 'Database'; Name = 'DiskWrite';         Metric = 'sqlanywhere_database_disk_writes_total';     Type = 'counter'; Scale = 1;    Help = 'Paginas gravadas no disco.' }
-    @{ Scope = 'Database'; Name = 'Commit';            Metric = 'sqlanywhere_database_commits_total';         Type = 'counter'; Scale = 1;    Help = 'COMMITs executados.' }
-    @{ Scope = 'Database'; Name = 'Rlbk';              Metric = 'sqlanywhere_database_rollbacks_total';       Type = 'counter'; Scale = 1;    Help = 'ROLLBACKs executados.' }
-    @{ Scope = 'Database'; Name = 'Chkpt';             Metric = 'sqlanywhere_database_checkpoints_total';     Type = 'counter'; Scale = 1;    Help = 'Checkpoints executados.' }
+    @{ Scope = 'Server';   Name = 'ConnCount';               Metric = 'sqlanywhere_server_connections';                  Type = 'gauge';   Scale = 1;              Help = 'Conexoes abertas no servidor.' }
+    @{ Scope = 'Server';   Name = 'ActiveReq';               Metric = 'sqlanywhere_server_active_requests';              Type = 'gauge';   Scale = 1;              Help = 'Workers atendendo requisicoes agora.' }
+    @{ Scope = 'Server';   Name = 'UnschReq';                Metric = 'sqlanywhere_server_waiting_requests';             Type = 'gauge';   Scale = 1;              Help = 'Requisicoes na fila aguardando um worker livre.' }
+    @{ Scope = 'Server';   Name = 'MultiProgrammingLevel';   Metric = 'sqlanywhere_server_multiprogramming_level';       Type = 'gauge';   Scale = 1;              Help = 'Maximo atual de tarefas simultaneas (acima disso as requisicoes vao para a fila).' }
+    @{ Scope = 'Server';   Name = 'RequestsReceived';        Metric = 'sqlanywhere_server_requests_total';               Type = 'counter'; Scale = 1;              Help = 'Requisicoes cliente/servidor (round trips) desde o inicio.' }
+    @{ Scope = 'Server';   Name = 'Commit';                  Metric = 'sqlanywhere_server_commits_total';                Type = 'counter'; Scale = 1;              Help = 'Requisicoes de COMMIT atendidas desde o inicio.' }
+    @{ Scope = 'Server';   Name = 'Rlbk';                    Metric = 'sqlanywhere_server_rollbacks_total';              Type = 'counter'; Scale = 1;              Help = 'Requisicoes de ROLLBACK atendidas desde o inicio.' }
+    @{ Scope = 'Server';   Name = 'ThreadDeadlocksReported'; Metric = 'sqlanywhere_server_thread_deadlocks_total';       Type = 'counter'; Scale = 1;              Help = 'Erros de thread deadlock devolvidos aos clientes (todos os workers bloqueados).' }
+    @{ Scope = 'Server';   Name = 'ProcessCPU';              Metric = 'sqlanywhere_server_cpu_seconds_total';            Type = 'counter'; Scale = 1;              Help = 'CPU acumulada pelo processo do servidor.' }
+    @{ Scope = 'Server';   Name = 'StartTime';               Metric = 'sqlanywhere_server_start_time_seconds';           Type = 'gauge';   Scale = 'DateTime';     Help = 'Horario de inicio do servidor (Unix).' }
+    @{ Scope = 'Server';   Name = 'PageSize';                Metric = 'sqlanywhere_server_page_size_bytes';              Type = 'gauge';   Scale = 1;              Help = 'Tamanho da pagina do cache do servidor.' }
+    @{ Scope = 'Server';   Name = 'CurrentCacheSize';        Metric = 'sqlanywhere_server_cache_size_bytes';             Type = 'gauge';   Scale = 1024;           Help = 'Tamanho atual do cache (alocado).' }
+    @{ Scope = 'Server';   Name = 'MinCacheSize';            Metric = 'sqlanywhere_server_cache_min_bytes';              Type = 'gauge';   Scale = 1024;           Help = 'Tamanho minimo permitido do cache.' }
+    @{ Scope = 'Server';   Name = 'MaxCacheSize';            Metric = 'sqlanywhere_server_cache_max_bytes';              Type = 'gauge';   Scale = 1024;           Help = 'Tamanho maximo permitido do cache.' }
+    @{ Scope = 'Server';   Name = 'PeakCacheSize';           Metric = 'sqlanywhere_server_cache_peak_bytes';             Type = 'gauge';   Scale = 1024;           Help = 'Maior tamanho do cache desde o inicio.' }
+    @{ Scope = 'Server';   Name = 'CacheFile';               Metric = 'sqlanywhere_server_cache_file_bytes';             Type = 'gauge';   Scale = 'ServerPage';   Help = 'Cache ocupado com dados dos arquivos do banco.' }
+    @{ Scope = 'Server';   Name = 'CacheFree';               Metric = 'sqlanywhere_server_cache_free_bytes';             Type = 'gauge';   Scale = 'ServerPage';   Help = 'Cache livre (paginas sem uso).' }
+    @{ Scope = 'Server';   Name = 'CacheAllocated';          Metric = 'sqlanywhere_server_cache_allocated_bytes';        Type = 'gauge';   Scale = 'ServerPage';   Help = 'Cache alocado para outros fins que nao dados dos arquivos (estruturas, consultas).' }
+    @{ Scope = 'Server';   Name = 'CacheFileDirty';          Metric = 'sqlanywhere_server_cache_dirty_bytes';            Type = 'gauge';   Scale = 'ServerPage';   Help = 'Cache com paginas alteradas aguardando gravacao.' }
+    @{ Scope = 'Server';   Name = 'CachePinned';             Metric = 'sqlanywhere_server_cache_pinned_bytes';           Type = 'gauge';   Scale = 'ServerPage';   Help = 'Cache com paginas fixadas (pinned).' }
+    @{ Scope = 'Server';   Name = 'CacheReplacements';       Metric = 'sqlanywhere_server_cache_replacements_total';     Type = 'counter'; Scale = 1;              Help = 'Paginas substituidas no cache desde o inicio.' }
+    @{ Scope = 'Server';   Name = 'CacheScavenges';          Metric = 'sqlanywhere_server_cache_scavenges_total';        Type = 'counter'; Scale = 1;              Help = 'Vezes em que o cache precisou procurar pagina para reaproveitar.' }
+    @{ Scope = 'Server';   Name = 'CachePanics';             Metric = 'sqlanywhere_server_cache_panics_total';           Type = 'counter'; Scale = 1;              Help = 'Vezes em que o cache nao encontrou pagina para alocar.' }
+    @{ Scope = 'Server';   Name = 'QueryMemGrantWaited';     Metric = 'sqlanywhere_server_query_memory_waits_total';     Type = 'counter'; Scale = 1;              Help = 'Vezes em que uma requisicao esperou memoria de consulta.' }
+    @{ Scope = 'Server';   Name = 'QueryMemGrantFailed';     Metric = 'sqlanywhere_server_query_memory_failures_total';  Type = 'counter'; Scale = 1;              Help = 'Vezes em que uma requisicao esperou memoria de consulta e nao conseguiu.' }
+    @{ Scope = 'Database'; Name = 'ConnCount';               Metric = 'sqlanywhere_database_connections';                Type = 'gauge';   Scale = 1;              Help = 'Conexoes abertas no banco.' }
+    @{ Scope = 'Database'; Name = 'PageSize';                Metric = 'sqlanywhere_database_page_size_bytes';            Type = 'gauge';   Scale = 1;              Help = 'Tamanho da pagina do banco.' }
+    @{ Scope = 'Database'; Name = 'FileSize';                Metric = 'sqlanywhere_database_file_bytes';                 Type = 'gauge';   Scale = 'DatabasePage'; Help = 'Tamanho do dbspace system.' }
+    @{ Scope = 'Database'; Name = 'FreePages';               Metric = 'sqlanywhere_database_free_bytes';                 Type = 'gauge';   Scale = 'DatabasePage'; Help = 'Espaco livre dentro do dbspace system.' }
+    @{ Scope = 'Database'; Name = 'CacheRead';               Metric = 'sqlanywhere_database_cache_reads_total';          Type = 'counter'; Scale = 1;              Help = 'Paginas procuradas no cache (inclui os acertos).' }
+    @{ Scope = 'Database'; Name = 'CacheHits';               Metric = 'sqlanywhere_database_cache_hits_total';           Type = 'counter'; Scale = 1;              Help = 'Paginas procuradas e encontradas no cache.' }
+    @{ Scope = 'Database'; Name = 'DiskRead';                Metric = 'sqlanywhere_database_disk_reads_total';           Type = 'counter'; Scale = 1;              Help = 'Paginas lidas do disco.' }
+    @{ Scope = 'Database'; Name = 'DiskWrite';               Metric = 'sqlanywhere_database_disk_writes_total';          Type = 'counter'; Scale = 1;              Help = 'Paginas alteradas gravadas no disco.' }
+    @{ Scope = 'Database'; Name = 'Commit';                  Metric = 'sqlanywhere_database_disk_flushes_total';         Type = 'counter'; Scale = 1;              Help = 'Flushes forcados do cache de disco do sistema operacional.' }
+    @{ Scope = 'Database'; Name = 'Rlbk';                    Metric = 'sqlanywhere_database_rollbacks_total';            Type = 'counter'; Scale = 1;              Help = 'Requisicoes de ROLLBACK atendidas no banco.' }
+    @{ Scope = 'Database'; Name = 'Chkpt';                   Metric = 'sqlanywhere_database_checkpoints_total';          Type = 'counter'; Scale = 1;              Help = 'Checkpoints executados.' }
+    @{ Scope = 'Database'; Name = 'LockCount';               Metric = 'sqlanywhere_database_locks';                      Type = 'gauge';   Scale = 1;              Help = 'Locks mantidos no banco agora.' }
+    @{ Scope = 'Database'; Name = 'CheckpointUrgency';       Metric = 'sqlanywhere_database_checkpoint_urgency_percent'; Type = 'gauge';   Scale = 1;              Help = 'Tempo desde o ultimo checkpoint, em % do checkpoint_time.' }
+    @{ Scope = 'Database'; Name = 'RecoveryUrgency';         Metric = 'sqlanywhere_database_recovery_urgency_percent';   Type = 'gauge';   Scale = 1;              Help = 'Tempo estimado de recuperacao, em % do recovery_time.' }
+    @{ Scope = 'Database'; Name = 'QueryLowMemoryStrategy';  Metric = 'sqlanywhere_database_low_memory_strategy_total';  Type = 'counter'; Scale = 1;              Help = 'Planos de execucao alterados por falta de memoria.' }
 )
 
 $script:Metrics = [ordered]@{}
@@ -215,6 +242,32 @@ function ConvertTo-Number([string]$Text) {
     return $number
 }
 
+# StartTime vem como texto 'AAAA-MM-DD HH:MM:SS.sss' no horario local do
+# servidor (ou do time_zone do banco, se definido). Convertido para Unix.
+function ConvertTo-UnixTime([string]$Text) {
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $formats = [string[]]@('yyyy-MM-dd HH:mm:ss.FFFFFF', 'yyyy-MM-dd HH:mm:ss')
+    $parsed = [DateTime]::MinValue
+    if (-not [DateTime]::TryParseExact($Text.Trim(), $formats, $Invariant,
+            [Globalization.DateTimeStyles]::AssumeLocal, [ref]$parsed)) { return $null }
+    return [double]([DateTimeOffset]$parsed).ToUnixTimeSeconds()
+}
+
+# Valor final da propriedade, ja na unidade da metrica, ou $null.
+function Get-PropertyValue($Item, $Values) {
+    $raw = $Values[$Item.Name]
+    if ($Item.Scale -is [string] -and $Item.Scale -eq 'DateTime') { return ConvertTo-UnixTime $raw }
+    $number = ConvertTo-Number $raw
+    if ($null -eq $number) { return $null }
+    if ($Item.Scale -is [string]) {
+        # ServerPage/DatabasePage: paginas x PageSize do mesmo escopo.
+        $pageSize = ConvertTo-Number $Values['PageSize']
+        if ($null -eq $pageSize -or $pageSize -le 0) { return $null }
+        return $number * $pageSize
+    }
+    return $number * $Item.Scale
+}
+
 # ------------------------------------------------------------------ principal
 
 Remove-OldLogs
@@ -249,13 +302,13 @@ try {
     $info = [ordered]@{ server = $settings.Server; database = $settings.Database; version = [string]$serverValues['ProductVersion'] }
     Add-Sample 'sqlanywhere_info' 'gauge' 'Servidor, banco e versao do SQL Anywhere (valor sempre 1).' $info 1
     foreach ($item in $Properties) {
-        $raw = if ($item.Scope -eq 'Server') { $serverValues[$item.Name] } else { $databaseValues[$item.Name] }
-        $number = ConvertTo-Number $raw
-        if ($null -eq $number) {
+        $values = if ($item.Scope -eq 'Server') { $serverValues } else { $databaseValues }
+        $value = Get-PropertyValue $item $values
+        if ($null -eq $value) {
             $missing += ($item.Scope + ':' + $item.Name)
             continue
         }
-        Add-Sample $item.Metric $item.Type $item.Help $labels ($number * $item.Scale)
+        Add-Sample $item.Metric $item.Type $item.Help $labels $value
     }
     if ($missing.Count -eq $Properties.Count) { throw 'Nenhuma propriedade retornou valor numerico.' }
     $success = 1
