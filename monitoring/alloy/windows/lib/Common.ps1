@@ -34,12 +34,11 @@ $SqlState          = Join-Path $DataDir 'sqlanywhere'
 $SqlOutput         = Join-Path $Base 'textfile\sqlanywhere\sqlanywhere.prom'
 $SqlTaskPath       = '\GrafanaLabs\'
 $SqlTaskName       = 'Alloy SQL Anywhere'
-# Modulo DB Connection Tester: coletor e execucao continua (ver install.ps1).
+# Modulo DB Connection Tester: so o coletor (ver install.ps1).
 $DbctState         = Join-Path $DataDir 'dbct'
 $DbctOutput        = Join-Path $Base 'textfile\dbct\dbct.prom'
 $DbctTaskPath      = '\GrafanaLabs\'
 $DbctCollectorTask = 'Alloy DBCT Collector'
-$DbctRunnerTask    = 'Alloy DBCT Runner'
 # Heartbeat opcional (Uptime Kuma + Loki), ver heartbeat-setup.ps1.
 $HeartbeatDir      = Join-Path $Base 'heartbeat'
 $HeartbeatUrlFile  = Join-Path $HeartbeatDir 'kuma-url'

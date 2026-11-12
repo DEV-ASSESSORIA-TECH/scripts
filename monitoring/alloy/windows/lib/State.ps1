@@ -317,40 +317,28 @@ function Show-InventoryDiagnostics {
     Write-UiRow 'Logs' 'none' "$LogDir (retencao 14 dias)"
 }
 
-# Linha de uma tarefa agendada: estado, ultima execucao e codigo.
-function Write-DbctTaskRow([string]$Label, [string]$Name, [bool]$Required) {
-    $task = Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $Name -ErrorAction SilentlyContinue
-    if (-not $task) {
-        if ($Required) { Write-UiRow $Label 'err' 'ausente: use [1] Reaplicar configuracao' }
-        else { Write-UiRow $Label 'none' 'sem perfil configurado (so coleta)' }
-        return
-    }
-    $info = Get-ScheduledTaskInfo -InputObject $task -ErrorAction SilentlyContinue
-    $last = 'nunca executada'
-    if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) {
-        $last = 'ultima ' + $info.LastRunTime.ToString('dd/MM HH:mm:ss') + ', codigo ' + $info.LastTaskResult
-    }
-    $kind = 'ok'
-    if ([string]$task.State -eq 'Disabled') { $kind = 'err' }
-    elseif ($Name -eq $DbctRunnerTask -and [string]$task.State -ne 'Running') { $kind = 'warn' }
-    elseif ($Name -ne $DbctRunnerTask -and (-not $info -or $info.LastTaskResult -ne 0)) { $kind = 'warn' }
-    Write-UiRow $Label $kind ("$($task.State) - $last")
-}
-
-# Tarefas, configuracao e ultima saida do modulo DBCT.
+# Tarefa do coletor, configuracao e ultima saida do modulo DBCT. A execucao
+# continua e do DBCT: o estado vem das metricas que o coletor publica.
 function Show-DbctDiagnostics {
     Write-UiSection 'DB CONNECTION TESTER'
     $config = $null
     try { $config = [IO.File]::ReadAllText((Join-Path $DbctState 'config.json')) | ConvertFrom-Json } catch { }
-    if ($config) {
-        Write-UiRow 'Banco' 'none' ([string]$config.dataDir)
-        $profileText = if ($config.profileId) { [string]$config.profileName } else { 'nenhum (so coleta)' }
-        Write-UiRow 'Perfil' 'none' $profileText
+    if ($config) { Write-UiRow 'Banco' 'none' ([string]$config.dataDir) }
+    else { Write-UiRow 'Config' 'err' 'ausente: use Reconfigurar DBCT' }
+    $task = Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctCollectorTask -ErrorAction SilentlyContinue
+    if (-not $task) {
+        Write-UiRow 'Coletor' 'err' 'ausente: use [1] Reaplicar configuracao'
     } else {
-        Write-UiRow 'Config' 'err' 'ausente: use Reconfigurar DBCT'
+        $info = Get-ScheduledTaskInfo -InputObject $task -ErrorAction SilentlyContinue
+        $last = 'nunca executada'
+        if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) {
+            $last = 'ultima ' + $info.LastRunTime.ToString('dd/MM HH:mm:ss') + ', codigo ' + $info.LastTaskResult
+        }
+        $kind = 'ok'
+        if ([string]$task.State -eq 'Disabled') { $kind = 'err' }
+        elseif (-not $info -or $info.LastTaskResult -ne 0) { $kind = 'warn' }
+        Write-UiRow 'Coletor' $kind ("$($task.State) - $last")
     }
-    Write-DbctTaskRow 'Coletor' $DbctCollectorTask $true
-    Write-DbctTaskRow 'Execucao' $DbctRunnerTask ($config -and $config.profileId)
     if (Test-Path -LiteralPath $DbctOutput -PathType Leaf) {
         $item = Get-Item -LiteralPath $DbctOutput
         $age = [int]((Get-Date) - $item.LastWriteTime).TotalSeconds
@@ -361,10 +349,18 @@ function Show-DbctDiagnostics {
         $text = if ($ok) { "coleta OK, atualizado ha ${age}s" } else { "ultima coleta falhou (ha ${age}s)" }
         if ($ok -and -not $active) { $text += ', nenhuma execucao ativa'; $kind = 'warn' }
         Write-UiRow 'Saida' $kind $text
+        if (@($content | Where-Object { $_ -match '^dbct_autostart_configured 1$' }).Count -gt 0) {
+            $running = @($content | Where-Object { $_ -match '^dbct_autostart_running 1$' }).Count -gt 0
+            $autoKind = if ($running) { 'ok' } else { 'warn' }
+            $autoText = if ($running) { 'configurada e em execucao' } else { 'configurada, parada (dbct run status)' }
+            Write-UiRow 'Automatica' $autoKind $autoText
+        } else {
+            Write-UiRow 'Automatica' 'none' 'nao configurada no DBCT (dbct run ... --autostart)'
+        }
     } else {
         Write-UiRow 'Saida' 'err' 'dbct.prom ausente'
     }
-    Write-UiRow 'Logs' 'none' "$LogDir\dbct-collector-*.log e dbct-runner-*.log (retencao 14 dias)"
+    Write-UiRow 'Logs' 'none' "$LogDir\dbct-collector-*.log (retencao 14 dias)"
 }
 
 # Tarefa agendada e ultimo arquivo gerado pelo coletor SQL Anywhere.

@@ -6,10 +6,13 @@ Metricas do DB Connection Tester (DBCT) para o textfile collector do Alloy.
 .DESCRIPTION
 Executado como SYSTEM pela tarefa agendada "\GrafanaLabs\Alloy DBCT Collector"
 (a cada 30 s), instalada pelo install.ps1 quando o modulo dbct esta ativo. Le a
-execucao ativa do banco do DBCT pela propria CLI (dbct history ... --format
-json, contrato formatVersion 1), processa apenas os ciclos novos desde a coleta
-anterior e gera textfile\dbct\dbct.prom, lido pelo Alloy no job
-integrations/dbconnectiontester:
+execucao ativa do banco do DBCT pela propria CLI, so com comandos de consulta
+(dbct run status e dbct history cycles, --format json, contrato formatVersion
+1), processa apenas os ciclos novos desde a coleta anterior e gera
+textfile\dbct\dbct.prom, lido pelo Alloy no job integrations/dbconnectiontester.
+A execucao em si e do DBCT (por exemplo, dbct run ... --autostart); o modulo
+nunca a inicia nem a altera.
+
 
   dbct_run_active                      execucao em andamento no banco (1 = sim)
   dbct_run_info                        execucao, perfil, destino e tipo (valor 1)
@@ -21,7 +24,7 @@ integrations/dbconnectiontester:
   dbct_stage_last_duration_seconds     duracao no ultimo ciclo
   dbct_stage_last_success              resultado do ultimo ciclo (1 = sucesso)
   dbct_last_cycle_timestamp_seconds    inicio do ultimo ciclo (Unix)
-  dbct_runner_*                        tarefa que mantem a execucao continua
+  dbct_autostart_*                     execucao automatica do DBCT neste banco
   dbct_collection_*                    saude da propria coleta
 
 Contadores pertencem a execucao atual: numa execucao nova voltam a zero (o
@@ -30,10 +33,8 @@ andamento ha mais de $CatchUpSeconds s quando o coletor a encontra pela primeira
 vez nao sao reprocessados, para nao lancar o passado no horario atual.
 
 Configuracao em data\dbct\ (so SYSTEM e Administradores):
-  config.json      dbct (caminho do dbct.exe), dataDir (pasta do data.db) e
-                   profileId (perfil da execucao continua; vazio = so coleta)
+  config.json      dbct (caminho do dbct.exe) e dataDir (pasta do data.db)
   state.json       posicao e contadores da coleta (recriado se ausente)
-  runner.json      estado da tarefa de execucao (gravado pelo dbct-runner.ps1)
 
 Logs diarios em logs\, com retencao de -LogRetentionDays dias.
 Manter este arquivo em ASCII: o Windows PowerShell 5.1 le arquivos sem BOM como ANSI.
@@ -54,7 +55,6 @@ $LogDir = Join-Path $Root 'logs'
 $OutFile = Join-Path $OutputDir 'dbct.prom'
 $ConfigFile = Join-Path $StateDir 'config.json'
 $StateFile = Join-Path $StateDir 'state.json'
-$RunnerFile = Join-Path $StateDir 'runner.json'
 $Invariant = [Globalization.CultureInfo]::InvariantCulture
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 # Ciclos por chamada e chamadas por coleta: limita o tempo da tarefa (25 s).
@@ -311,22 +311,13 @@ function Add-StateMetrics($State, [int]$Active, $WindowMax) {
     }
 }
 
-# Estado gravado pelo dbct-runner.ps1 (ausente quando a execucao continua nao
-# foi configurada).
-function Add-RunnerMetrics($Config) {
-    $enabled = if ([string]::IsNullOrWhiteSpace([string]$Config.profileId)) { 0 } else { 1 }
-    Add-Sample 'dbct_runner_enabled' 'gauge' 'Execucao continua configurada no modulo (1 = sim).' $null $enabled
-    if (-not $enabled -or -not (Test-Path -LiteralPath $RunnerFile -PathType Leaf)) { return }
-    try { $runner = [IO.File]::ReadAllText($RunnerFile) | ConvertFrom-Json } catch { return }
-    $running = 0
-    if ($runner.pid) {
-        $process = Get-Process -Id ([int]$runner.pid) -ErrorAction SilentlyContinue
-        if ($process -and $process.ProcessName -eq 'dbct') { $running = 1 }
-    }
-    Add-Sample 'dbct_runner_running' 'gauge' 'Processo dbct da execucao continua ativo (1 = sim).' $null $running
-    Add-Sample 'dbct_runner_restarts_total' 'counter' 'Reinicios do dbct pela tarefa de execucao desde o inicio da tarefa.' $null ([double]$runner.restarts)
-    if ($null -ne $runner.lastExitCode) {
-        Add-Sample 'dbct_runner_last_exit_code' 'gauge' 'Codigo de saida do ultimo dbct encerrado (130 = parada, 4 = outra execucao ativa).' $null ([double]$runner.lastExitCode)
+# Execucao automatica do DBCT (dbct run ... --autostart), pelo dbct run status.
+function Add-AutostartMetrics($Status) {
+    $configured = if ($Status.autostart) { 1 } else { 0 }
+    Add-Sample 'dbct_autostart_configured' 'gauge' 'Execucao automatica do DBCT configurada neste banco (1 = sim).' $null $configured
+    if ($configured) {
+        $running = if ($Status.autostart.loopRunning) { 1 } else { 0 }
+        Add-Sample 'dbct_autostart_running' 'gauge' 'Processo da execucao automatica ativo (1 = sim).' $null $running
     }
 }
 
@@ -345,8 +336,9 @@ try {
     $state = Read-State
     $windowMax = @{}
 
-    $runs = Invoke-Dbct $config.dbct (@('history', 'list', '--status', 'Running', '--page-size', '1') + $common)
-    $run = @($runs.items) | Select-Object -First 1
+    # run status: execucao ativa (com processo gravando), sem registros abandonados.
+    $status = Invoke-Dbct $config.dbct (@('run', 'status') + $common)
+    $run = if ($status.active) { @($status.runs) | Where-Object { -not $_.abandoned } | Select-Object -First 1 } else { $null }
     if ($run) {
         $active = 1
         if (-not $state -or $state.runId -ne [string]$run.runId) {
@@ -369,7 +361,7 @@ try {
         Save-State $state
     }
     if ($state) { Add-StateMetrics $state $active $windowMax }
-    Add-RunnerMetrics $config
+    Add-AutostartMetrics $status
     $success = 1
 } catch {
     $failure = $_.Exception.Message

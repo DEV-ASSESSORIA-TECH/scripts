@@ -162,7 +162,7 @@ política), nos módulos Antimalware (no acesso) e Advanced Threat Control.
 **Não excluir** `powershell.exe`, `bash`, `python3` nem pastas temporárias
 inteiras: isso abriria uma brecha para qualquer script. As tarefas agendadas
 dos módulos (`heartbeat.ps1`, `hypervisor-inventory.ps1`,
-`sqlanywhere-collector.ps1`, `dbct-collector.ps1`, `dbct-runner.ps1`) rodam com `powershell.exe -File <script>` a
+`sqlanywhere-collector.ps1`, `dbct-collector.ps1`) rodam com `powershell.exe -File <script>` a
 partir das pastas acima. Se o ATC as bloquear, prefira uma exclusão por
 **linha de comando** que contenha o caminho do script, se a versão do
 GravityZone oferecer.
@@ -222,7 +222,7 @@ Os mesmos comandos valem para `alloyctl` e para o ponto de entrada baixado
 | `docker.alloy` / `hyperv.alloy` / `sqlanywhere.alloy` / `dbct.alloy` | módulos opcionais |
 | `hypervisor-inventory.ps1` | inventário de VMs do módulo Hyper-V (tarefa agendada) |
 | `sqlanywhere-collector.ps1` | coletor do módulo SQL Anywhere (tarefa agendada) |
-| `dbct-collector.ps1` / `dbct-runner.ps1` | coletor e execução contínua do módulo DB Connection Tester (tarefas agendadas) |
+| `dbct-collector.ps1` | coletor do módulo DB Connection Tester (tarefa agendada) |
 | `heartbeat-setup.*` | configura, testa e remove o heartbeat |
 | `heartbeat.*` | heartbeat executado a cada minuto (tarefa agendada / timer systemd) |
 | `rmm/tactical-estacao.ps1` | instalação de estação pelo Tactical RMM, sem perguntas |
@@ -384,38 +384,33 @@ digitar de novo.
 
 ## Módulo DB Connection Tester
 
-Para máquinas que monitoram a conexão até um banco com o
+Publica no Prometheus as falhas e lentidões de uma execução do
 [DB Connection Tester](https://github.com/DEV-ASSESSORIA-TECH/DBConnectionTester)
-(DBCT). Vale para servidores **e estações**. Requer o DBCT com o comando
-`dbct history cycles` (versão posterior à 3.0.0), instalado pelo MSI ou portátil.
+(DBCT), para consultar pelo horário. Vale para servidores **e estações**.
+
+O módulo **só lê** o banco do DBCT, pela CLI pública (`dbct run status` e
+`dbct history cycles`). A execução é do próprio DBCT, que funciona sem o Alloy:
+para mantê-la rodando e voltando com o Windows, configure-a no DBCT, por exemplo
+em um terminal de administrador:
+
+```powershell
+dbct run --type tcp --host srv-db --port 1433 --interval 5 --data-dir "C:\ProgramData\DBConnectionTester" --autostart
+```
+
+(`dbct run status`, `dbct run stop`, `dbct autostart show|disable`; veja o guia da
+CLI do DBCT.) Requer um DBCT com `run status` e `history cycles`, posterior à 3.0.0.
 
 Ative em **[2] Módulos opcionais > [4] Ativar DBCT** (ou `-Modules dbct`). A
-configuração pergunta, sugerindo o que encontrar na máquina:
-
-1. o `dbct.exe` (MSI por máquina ou por usuário, PATH ou portátil);
-2. a pasta do banco do DBCT, a que contém o `data.db` (local de cada usuário,
-   `ProgramData` ou `Data` ao lado do executável portátil);
-3. o perfil da **execução contínua**, entre os perfis salvos nesse banco, ou
-   `0` para só coletar a execução que a GUI ou a CLI já estiverem fazendo;
-4. a senha do banco testado, se o perfil exigir.
-
-O perfil é testado com um ciclo, que fica registrado no histórico do DBCT.
-**[5] Reconfigurar DBCT** (ou `install.ps1 -ReconfigureDbct`) pergunta tudo de
-novo.
+configuração pergunta, sugerindo o que encontrar na máquina, o `dbct.exe` (MSI por
+máquina ou por usuário, PATH ou portátil) e a pasta do banco do DBCT, a que contém
+o `data.db`. Avisa se o banco não tiver execução ativa nem automática.
+**[5] Reconfigurar DBCT** (ou `install.ps1 -ReconfigureDbct`) pergunta de novo.
 
 | Parte | Onde | O que faz |
 |---|---|---|
-| Execução contínua | tarefa `\GrafanaLabs\Alloy DBCT Runner`, `scripts\dbct-runner.ps1` | inicia com o Windows, como SYSTEM, e mantém `dbct run --profile <id> --continuous true` no banco escolhido; quando o `dbct` termina (outra execução gravando, erro, falha), tenta de novo em 30 a 60 s |
-| Coletor | tarefa `\GrafanaLabs\Alloy DBCT Collector` (a cada 30 s), `scripts\dbct-collector.ps1`, job `integrations/dbconnectiontester` | lê a execução ativa pela CLI do DBCT (`history list` e `history cycles`), processa só os ciclos novos e grava `textfile\dbct\dbct.prom` |
+| Coletor | tarefa `\GrafanaLabs\Alloy DBCT Collector` (a cada 30 s), `scripts\dbct-collector.ps1`, job `integrations/dbconnectiontester` | encontra a execução ativa, processa só os ciclos novos e grava `textfile\dbct\dbct.prom` |
 
-Uma execução por banco: enquanto a GUI ou outra CLI grava no mesmo banco, a
-execução contínua espera e o coletor acompanha a execução que estiver ativa.
-Parar ou desativar o módulo encerra o `dbct` da execução contínua; a execução
-fica `Running` e o próprio DBCT a marca como `Interrupted` no próximo início.
-Desligar o Windows a registra como `Stopped`.
-
-Métricas (sem labels de host além dos que o Alloy adiciona; uma execução por
-máquina):
+Métricas (sem labels de host além dos que o Alloy adiciona; uma execução por banco):
 
 | Métrica | Uso |
 |---|---|
@@ -424,7 +419,7 @@ máquina):
 | `dbct_stage_checks_total{stage}`, `dbct_cycles_total` | volume de testes |
 | `dbct_stage_last_success{stage}`, `dbct_stage_last_duration_seconds{stage}` | estado do último ciclo |
 | `dbct_run_active`, `dbct_run_info{run_id,profile,target,database_type}` | execução monitorada |
-| `dbct_runner_running`, `dbct_runner_restarts_total`, `dbct_runner_last_exit_code` | tarefa de execução contínua |
+| `dbct_autostart_configured`, `dbct_autostart_running` | execução automática do DBCT no banco |
 | `dbct_collection_success`, `_duration_seconds`, `_timestamp_seconds` | saúde da coleta |
 
 Consultas para investigar um horário (Explore, intervalo em volta do horário
@@ -444,14 +439,14 @@ histórico do DBCT.
 
 | Pasta | Arquivos | Ciclo de vida |
 |---|---|---|
-| `scripts\` | `dbct-collector.ps1`, `dbct-runner.ps1` | substituídos a cada reaplicação |
+| `scripts\` | `dbct-collector.ps1` | substituído a cada reaplicação |
 | `textfile\dbct\` | `dbct.prom` | sobrescrito a cada execução |
-| `data\dbct\` | `config.json` (`dbct.exe`, pasta do banco e perfil) e `password.dpapi` (senha cifrada com DPAPI da máquina, só quando o perfil exige) | mantidos ao desativar o módulo ou desinstalar; removidos na limpeza completa |
-| `data\dbct\` | `state.json` (posição e contadores da coleta) e `runner.json` (processo da execução contínua) | removidos ao desativar o módulo |
-| `logs\` | `dbct-collector-AAAAMMDD.log` e `dbct-runner-AAAAMMDD.log` | 14 dias |
+| `data\dbct\` | `config.json` (`dbct.exe` e pasta do banco) | mantido ao desativar o módulo ou desinstalar; removido na limpeza completa |
+| `data\dbct\` | `state.json` (posição e contadores da coleta) | removido ao desativar o módulo |
+| `logs\` | `dbct-collector-AAAAMMDD.log` | 14 dias |
 
-Com autenticação Windows do SQL Server, a execução contínua roda como SYSTEM e
-se apresenta ao SQL Server com a conta do computador.
+Desativar o módulo ou desinstalar o Alloy não altera o DBCT: a execução
+automática, se configurada, continua.
 
 ## Heartbeat (Uptime Kuma + Loki)
 

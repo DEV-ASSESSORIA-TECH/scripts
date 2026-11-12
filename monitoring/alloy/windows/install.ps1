@@ -8,7 +8,7 @@
 #   dbct (DB Connection Tester) tambem vale no perfil estacao e nunca e
 #   oferecido automaticamente.
 # -ReconfigureSqlAnywhere: pede de novo servidor, banco e usuario do SQL Anywhere.
-# -ReconfigureDbct: pede de novo dbct.exe, pasta do banco, perfil e senha do DBCT.
+# -ReconfigureDbct: pede de novo o dbct.exe e a pasta do banco do DBCT.
 # -Perfil: servidor (config.alloy, job integrations/windows, com alertas) ou
 #   estacao (desktop.alloy, job integrations/windows-desktop: maquina
 #   descartavel, sem alertas e sem modulos opcionais). auto (padrao) mantem o
@@ -76,23 +76,16 @@ $SqlDriver = 'SQL Anywhere 17'
 $SqlDefaultLinks = 'SharedMemory,TCPIP(HOST=127.0.0.1)'
 # Mesma entropia do sqlanywhere-collector.ps1.
 $SqlEntropy = [Text.Encoding]::UTF8.GetBytes('AssessoriaTech-Alloy-SQLAnywhere')
-# DB Connection Tester: coletor (a cada 30 s), execucao continua (no boot),
-# configuracao (senha DPAPI), saida e logs.
+# DB Connection Tester: so o coletor (a cada 30 s). A execucao continua e do
+# proprio DBCT (dbct run ... --autostart); o modulo apenas le o banco.
 $DbctCollectorName = 'dbct-collector.ps1'
 $DbctCollectorScript = Join-Path $ScriptsDir $DbctCollectorName
-$DbctRunnerName = 'dbct-runner.ps1'
-$DbctRunnerScript = Join-Path $ScriptsDir $DbctRunnerName
 $DbctState = Join-Path $DataDir 'dbct'
 $DbctConfigFile = Join-Path $DbctState 'config.json'
-$DbctPasswordFile = Join-Path $DbctState 'password.dpapi'
-$DbctRunnerFile = Join-Path $DbctState 'runner.json'
 $DbctOutputDir = Join-Path $TextfileDir 'dbct'
 $DbctOutput = Join-Path $DbctOutputDir 'dbct.prom'
 $DbctTaskPath = '\GrafanaLabs\'
 $DbctCollectorTask = 'Alloy DBCT Collector'
-$DbctRunnerTask = 'Alloy DBCT Runner'
-# Mesma entropia do dbct-runner.ps1.
-$DbctEntropy = [Text.Encoding]::UTF8.GetBytes('AssessoriaTech-Alloy-DBCT')
 
 function Log([string]$Text) { Write-Host "[Alloy] $Text" }
 function Ensure-Directory([string]$Path) {
@@ -586,18 +579,6 @@ function Find-DbctDataDirs([string]$Dbct) {
 
 function Test-DbctSettings { Test-Path -LiteralPath $DbctConfigFile -PathType Leaf }
 
-# Perfil cujo teste de banco usa usuario e senha (mesma regra do DBCT).
-function Test-DbctProfileNeedsPassword($DbctProfile) {
-    if (-not $DbctProfile.executionDefaults.databaseTest) { return $false }
-    switch ([string]$DbctProfile.databaseType) {
-        'MySqlMariaDb' { return $true }
-        'PostgreSql' { return $true }
-        'SapSqlAnywhere' { return $true }
-        'SqlServer' { return [string]$DbctProfile.sqlServerAuthentication -eq 'SqlLogin' }
-    }
-    return $false
-}
-
 function Select-DbctValue([string]$Title, [string[]]$Options, [string]$Current) {
     $default = if ($Current) { $Current } elseif ($Options.Count -gt 0) { $Options[0] } else { '' }
     if ($Options.Count -gt 0) {
@@ -607,168 +588,73 @@ function Select-DbctValue([string]$Title, [string[]]$Options, [string]$Current) 
     return (Read-Value $Title $default).Trim().Trim('"').TrimEnd('\')
 }
 
-# Pede dbct.exe, pasta do banco e perfil da execucao continua (com senha, se
-# o perfil exigir) e valida cada um com a propria CLI. Nada e gravado aqui:
-# Save-DbctSettings grava depois da validacao do Alloy.
+# Pede o dbct.exe e a pasta do banco e valida os dois com a propria CLI. A
+# execucao continua nao e configurada aqui: e do DBCT (dbct run ... --autostart).
+# Nada e gravado aqui: Save-DbctSettings grava depois da validacao do Alloy.
 function Read-DbctSettings {
     $current = $null
     if (Test-Path -LiteralPath $DbctConfigFile -PathType Leaf) {
         try { $current = [IO.File]::ReadAllText($DbctConfigFile) | ConvertFrom-Json } catch { }
     }
     Write-Host ''
-    Write-Host '  Monitoramento do DB Connection Tester: o coletor le a execucao ativa do banco'
-    Write-Host '  do DBCT (data.db) e, opcionalmente, mantem uma execucao continua de um perfil'
-    Write-Host '  salvo, iniciada com o Windows.'
+    Write-Host '  Monitoramento do DB Connection Tester: o coletor le, a cada 30 s, a execucao'
+    Write-Host '  ativa no banco do DBCT (data.db) e publica falhas e lentidoes no Prometheus.'
     $dbct = Select-DbctValue 'dbct.exe' (Find-DbctExecutables) ([string]$current.dbct)
     if (-not (Test-Path -LiteralPath $dbct -PathType Leaf)) { throw "dbct.exe nao encontrado: $dbct" }
-    $help = Invoke-DbctCommand $dbct @('history', 'cycles', '--help')
-    if ($help.ExitCode -ne 0) { throw 'Este dbct.exe nao oferece "history cycles": atualize o DB Connection Tester.' }
-
+    foreach ($required in @(@('history', 'cycles', '--help'), @('run', 'status', '--help'))) {
+        if ((Invoke-DbctCommand $dbct $required).ExitCode -ne 0) {
+            throw "Este dbct.exe nao oferece ""$($required[0]) $($required[1])"": atualize o DB Connection Tester."
+        }
+    }
     $dataDir = Select-DbctValue 'Pasta do banco do DBCT (com data.db)' (Find-DbctDataDirs $dbct) ([string]$current.dataDir)
     if (-not (Test-Path -LiteralPath (Join-Path $dataDir 'data.db') -PathType Leaf)) { throw "data.db nao encontrado em $dataDir" }
     $common = @('--data-dir', $dataDir, '--format', 'json')
-    [void](Invoke-DbctJson $dbct (@('history', 'list', '--page-size', '1') + $common))
+    $status = Invoke-DbctJson $dbct (@('run', 'status') + $common)
     Log "Banco do DBCT OK: $dataDir"
-
-    $profiles = @(Invoke-DbctJson $dbct (@('profiles', 'list') + $common))
-    Write-Host ''
-    Write-Host '  Execucao continua (iniciada com o Windows, como SYSTEM):'
-    Write-Host '    [0] nenhuma: so coletar a execucao ativa iniciada pela GUI ou pela CLI'
-    for ($i = 0; $i -lt $profiles.Count; $i++) {
-        $item = $profiles[$i]
-        $where = if ($item.port) { "$($item.host):$($item.port)" } elseif ($item.sqliteFile) { $item.sqliteFile } else { $item.host }
-        Write-Host ("    [{0}] {1} - {2} {3}" -f ($i + 1), $item.name, $item.databaseType, $where)
+    $autostart = Invoke-DbctJson $dbct (@('autostart', 'show') + $common)
+    if ($autostart.enabled) {
+        Log "Execucao automatica do DBCT configurada neste banco ($($autostart.scope))."
+    } elseif (-not $status.active) {
+        Write-Warning ('Nenhuma execucao ativa e nenhuma execucao automatica neste banco. O coletor so publica enquanto houver ' +
+            'execucao. Para manter uma, iniciada com o Windows: dbct run <parametros> --data-dir "' + $dataDir + '" --autostart')
     }
-    $defaultChoice = '0'
-    for ($i = 0; $i -lt $profiles.Count; $i++) {
-        if ([string]$profiles[$i].profileId -eq [string]$current.profileId) { $defaultChoice = [string]($i + 1) }
-    }
-    $choice = Read-Value 'Perfil' $defaultChoice
-    $index = 0
-    if (-not [int]::TryParse($choice, [ref]$index) -or $index -lt 0 -or $index -gt $profiles.Count) { throw "Opcao invalida: $choice" }
-
-    $settings = @{ dbct = $dbct; dataDir = $dataDir; profileId = ''; profileName = ''; password = $null }
-    if ($index -eq 0) { return $settings }
-    $selected = $profiles[$index - 1]
-    $settings.profileId = [string]$selected.profileId
-    $settings.profileName = [string]$selected.name
-    if ([string]$selected.databaseType -eq 'SqlServer' -and [string]$selected.sqlServerAuthentication -eq 'Windows') {
-        Write-Warning 'Autenticacao Windows do SQL Server: a execucao continua roda como SYSTEM e usa a conta do computador no SQL Server.'
-    }
-    if (Test-DbctProfileNeedsPassword $selected) {
-        $secure = Read-Host 'Senha do banco testado pelo perfil' -AsSecureString
-        $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-        try { $settings.password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
-        finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
-    }
-    Log 'Testando o perfil com um ciclo (fica registrado no historico do DBCT)...'
-    $arguments = @('run', '--profile', $settings.profileId, '--count', '1', '--interval', '0', '--no-progress') + $common
-    if ($null -ne $settings.password) { $arguments += '--password-stdin' }
-    $test = Invoke-DbctCommand $dbct $arguments $settings.password 180
-    switch ($test.ExitCode) {
-        0 { Log 'Perfil OK: o ciclo de teste passou.' }
-        1 { Write-Warning 'O ciclo de teste registrou falhas de diagnostico. A configuracao e valida; confira o destino no historico do DBCT.' }
-        4 { Write-Warning 'Outra execucao esta gravando neste banco (GUI ou CLI). A execucao continua comeca quando ela terminar.' }
-        default { throw "Teste do perfil falhou (codigo $($test.ExitCode)): $($test.Error)" }
-    }
-    return $settings
+    return @{ dbct = $dbct; dataDir = $dataDir }
 }
 
 function Save-DbctSettings([hashtable]$Settings) {
     Ensure-Directory $DbctState
-    if ($null -ne $Settings.password) {
-        Add-Type -AssemblyName System.Security
-        $blob = [Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($Settings.password), $DbctEntropy,
-            [Security.Cryptography.DataProtectionScope]::LocalMachine)
-        [IO.File]::WriteAllBytes($DbctPasswordFile, $blob)
-    } else {
-        Remove-Item -LiteralPath $DbctPasswordFile -Force -ErrorAction SilentlyContinue
-    }
-    $json = [ordered]@{ dbct = $Settings.dbct; dataDir = $Settings.dataDir; profileId = $Settings.profileId; profileName = $Settings.profileName } |
-        ConvertTo-Json
+    $json = [ordered]@{ dbct = $Settings.dbct; dataDir = $Settings.dataDir } | ConvertTo-Json
     [IO.File]::WriteAllText($DbctConfigFile, $json, (New-Object System.Text.UTF8Encoding($false)))
-    # Posicao da coleta anterior nao vale para outro banco ou perfil.
+    # Posicao da coleta anterior nao vale para outro banco.
     Remove-Item -LiteralPath (Join-Path $DbctState 'state.json') -Force -ErrorAction SilentlyContinue
     Log "DBCT: configuracao gravada em $DbctState."
 }
 
-# Para a tarefa de execucao e o dbct que ela iniciou (a execucao fica Running
-# e o DBCT a marca como Interrupted no proximo inicio).
-function Stop-DbctRunner {
-    $task = Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctRunnerTask -ErrorAction SilentlyContinue
-    if ($task -and [string]$task.State -eq 'Running') { Stop-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctRunnerTask }
-    if (Test-Path -LiteralPath $DbctRunnerFile -PathType Leaf) {
-        try {
-            $runner = [IO.File]::ReadAllText($DbctRunnerFile) | ConvertFrom-Json
-            if ($runner.pid) {
-                Get-Process -Id ([int]$runner.pid) -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'dbct' } |
-                    Stop-Process -Force -ErrorAction SilentlyContinue
-            }
-        } catch { }
-    }
-}
-
-# Coletor (a cada 30 s, como o do SQL Anywhere) e execucao continua (no boot,
-# sem limite de tempo, so com perfil configurado). Desabilitado: remove
-# tarefas, scripts, saida, estado e logs; a configuracao fica para reativar
-# (a limpeza completa a remove).
-function Sync-DbctModule([bool]$Enabled, [string]$StagedCollector, [string]$StagedRunner, [bool]$Reconfigured) {
+# Coletor a cada 30 s, como o do SQL Anywhere. Desabilitado: remove tarefa,
+# script, saida, estado e logs; a configuracao fica para reativar (a limpeza
+# completa a remove). Nada no DBCT e alterado.
+function Sync-DbctModule([bool]$Enabled, [string]$StagedCollector) {
     $collectorTask = Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctCollectorTask -ErrorAction SilentlyContinue
-    $runnerTask = Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctRunnerTask -ErrorAction SilentlyContinue
     if (-not $Enabled) {
         $hadFiles = (Test-Path -LiteralPath $DbctCollectorScript) -or (Test-Path -LiteralPath $DbctOutput)
-        Stop-DbctRunner
-        if ($runnerTask) { Unregister-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctRunnerTask -Confirm:$false }
         if ($collectorTask) { Unregister-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctCollectorTask -Confirm:$false }
-        foreach ($path in @($DbctCollectorScript, $DbctRunnerScript, $DbctOutput, ($DbctOutput + '.tmp'),
-                            (Join-Path $DbctState 'state.json'), $DbctRunnerFile)) {
+        foreach ($path in @($DbctCollectorScript, $DbctOutput, ($DbctOutput + '.tmp'), (Join-Path $DbctState 'state.json'))) {
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         }
         if (Test-Path -LiteralPath $LogDir) {
-            Get-ChildItem -LiteralPath $LogDir -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -like 'dbct-collector-*.log' -or $_.Name -like 'dbct-runner-*.log' } |
+            Get-ChildItem -LiteralPath $LogDir -Filter 'dbct-collector-*.log' -File -ErrorAction SilentlyContinue |
                 Remove-Item -Force -ErrorAction SilentlyContinue
         }
-        if ($collectorTask -or $runnerTask -or $hadFiles) {
-            Log "Modulo DBCT removido (tarefas, scripts, saida e logs). Configuracao mantida em $DbctState."
+        if ($collectorTask -or $hadFiles) {
+            Log "Coletor DBCT removido (tarefa, script, saida e logs). Configuracao mantida em $DbctState."
         }
         return
     }
 
-    $config = [IO.File]::ReadAllText($DbctConfigFile) | ConvertFrom-Json
-    $runnerChanged = -not (Same-File $StagedRunner $DbctRunnerScript)
     if (-not (Same-File $StagedCollector $DbctCollectorScript)) {
         Copy-Item -LiteralPath $StagedCollector -Destination $DbctCollectorScript -Force
         Log "DBCT: coletor instalado em $DbctCollectorScript."
     }
-
-    if ([string]::IsNullOrWhiteSpace([string]$config.profileId)) {
-        if ($runnerTask) {
-            Stop-DbctRunner
-            Unregister-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctRunnerTask -Confirm:$false
-            Log 'DBCT: execucao continua removida (nenhum perfil configurado).'
-        }
-        Remove-Item -LiteralPath $DbctRunnerScript -Force -ErrorAction SilentlyContinue
-    } else {
-        if ($runnerChanged -or $Reconfigured) { Stop-DbctRunner }
-        if ($runnerChanged) { Copy-Item -LiteralPath $StagedRunner -Destination $DbctRunnerScript -Force }
-        $system = ([System.Security.Principal.SecurityIdentifier]::new('S-1-5-18')).Translate([System.Security.Principal.NTAccount]).Value
-        $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-        $action = New-ScheduledTaskAction -Execute $powershell -Argument ('-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $DbctRunnerScript)
-        $principal = New-ScheduledTaskPrincipal -UserId $system -LogonType ServiceAccount -RunLevel Highest
-        # Sem limite de tempo (PT0S); o script reinicia o dbct sozinho, e o
-        # Agendador reinicia o proprio script se ele cair.
-        $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
-            -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-        Register-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctRunnerTask -Action $action -Trigger (New-ScheduledTaskTrigger -AtStartup) `
-            -Principal $principal -Settings $settings -Force `
-            -Description 'Execucao continua do DB Connection Tester para o modulo dbct do Grafana Alloy. Gerenciado pelo install.ps1.' | Out-Null
-        if ([string](Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctRunnerTask).State -ne 'Running') {
-            Start-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctRunnerTask
-            Log "DBCT: execucao continua do perfil '$($config.profileName)' iniciada (tambem a cada inicio do Windows)."
-        }
-    }
-
     $start = (Get-Date).Date
     $phaseA = New-ScheduledTaskTrigger -Once -At $start -RepetitionInterval (New-TimeSpan -Minutes 1)
     $phaseB = New-ScheduledTaskTrigger -Once -At $start.AddSeconds(30) -RepetitionInterval (New-TimeSpan -Minutes 1)
@@ -788,7 +674,7 @@ function Sync-ModuleTasks {
     $failures = @()
     try { Sync-HypervisorInventory $hypervEnabled $stageInventory } catch { $failures += $_.Exception.Message }
     try { Sync-SqlAnywhereCollector $sqlEnabled $stageSqlCollector } catch { $failures += $_.Exception.Message }
-    try { Sync-DbctModule $dbctEnabled $stageDbctCollector $stageDbctRunner ($null -ne $dbctPending) } catch { $failures += $_.Exception.Message }
+    try { Sync-DbctModule $dbctEnabled $stageDbctCollector } catch { $failures += $_.Exception.Message }
     if ($failures.Count -gt 0) { throw ($failures -join ' ') }
 }
 
@@ -966,15 +852,11 @@ try {
         Assert-ScriptSyntax $stageSqlCollector
     }
     $stageDbctCollector = $null
-    $stageDbctRunner = $null
     if ($dbctEnabled) {
         Copy-ModuleFile 'dbct.alloy' (Join-Path $stage 'dbct.alloy')
         $stageDbctCollector = Join-Path $stage $DbctCollectorName
         Copy-ModuleFile $DbctCollectorName $stageDbctCollector
         Assert-ScriptSyntax $stageDbctCollector
-        $stageDbctRunner = Join-Path $stage $DbctRunnerName
-        Copy-ModuleFile $DbctRunnerName $stageDbctRunner
-        Assert-ScriptSyntax $stageDbctRunner
     }
     if (Test-Path -LiteralPath $ConfigDir -PathType Container) {
         Get-ChildItem -LiteralPath $ConfigDir -Filter '*.alloy' -File | ForEach-Object {
