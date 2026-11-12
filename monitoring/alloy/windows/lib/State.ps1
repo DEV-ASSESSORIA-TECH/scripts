@@ -44,6 +44,7 @@ function Test-CredentialPresent {
 }
 function Test-HyperVModule { Test-Path -LiteralPath $HyperVFile -PathType Leaf }
 function Test-SqlAnywhereModule { Test-Path -LiteralPath $SqlAnywhereFile -PathType Leaf }
+function Test-DbctModule { Test-Path -LiteralPath $DbctFile -PathType Leaf }
 function Test-HeartbeatConfigured {
     (Test-Path -LiteralPath $HeartbeatUrlFile -PathType Leaf) -or ($null -ne (Get-HeartbeatTask))
 }
@@ -232,6 +233,7 @@ function Show-AlloyHeader {
     $modules = 'Windows'
     if (Test-HyperVModule) { $modules += ' + Hyper-V' }
     if (Test-SqlAnywhereModule) { $modules += ' + SQL Anywhere' }
+    if (Test-DbctModule) { $modules += ' + DBCT' }
     Write-UiRow 'Modulos' 'none' $modules
     $heartbeat = Get-HeartbeatStatus
     if ($heartbeat) { Write-UiRow 'Heartbeat' $heartbeat.Kind $heartbeat.Text }
@@ -313,6 +315,56 @@ function Show-InventoryDiagnostics {
         Write-UiRow 'Saida' 'err' 'hypervisor.prom ausente'
     }
     Write-UiRow 'Logs' 'none' "$LogDir (retencao 14 dias)"
+}
+
+# Linha de uma tarefa agendada: estado, ultima execucao e codigo.
+function Write-DbctTaskRow([string]$Label, [string]$Name, [bool]$Required) {
+    $task = Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $Name -ErrorAction SilentlyContinue
+    if (-not $task) {
+        if ($Required) { Write-UiRow $Label 'err' 'ausente: use [1] Reaplicar configuracao' }
+        else { Write-UiRow $Label 'none' 'sem perfil configurado (so coleta)' }
+        return
+    }
+    $info = Get-ScheduledTaskInfo -InputObject $task -ErrorAction SilentlyContinue
+    $last = 'nunca executada'
+    if ($info -and $info.LastRunTime -and $info.LastRunTime.Year -gt 2000) {
+        $last = 'ultima ' + $info.LastRunTime.ToString('dd/MM HH:mm:ss') + ', codigo ' + $info.LastTaskResult
+    }
+    $kind = 'ok'
+    if ([string]$task.State -eq 'Disabled') { $kind = 'err' }
+    elseif ($Name -eq $DbctRunnerTask -and [string]$task.State -ne 'Running') { $kind = 'warn' }
+    elseif ($Name -ne $DbctRunnerTask -and (-not $info -or $info.LastTaskResult -ne 0)) { $kind = 'warn' }
+    Write-UiRow $Label $kind ("$($task.State) - $last")
+}
+
+# Tarefas, configuracao e ultima saida do modulo DBCT.
+function Show-DbctDiagnostics {
+    Write-UiSection 'DB CONNECTION TESTER'
+    $config = $null
+    try { $config = [IO.File]::ReadAllText((Join-Path $DbctState 'config.json')) | ConvertFrom-Json } catch { }
+    if ($config) {
+        Write-UiRow 'Banco' 'none' ([string]$config.dataDir)
+        $profileText = if ($config.profileId) { [string]$config.profileName } else { 'nenhum (so coleta)' }
+        Write-UiRow 'Perfil' 'none' $profileText
+    } else {
+        Write-UiRow 'Config' 'err' 'ausente: use Reconfigurar DBCT'
+    }
+    Write-DbctTaskRow 'Coletor' $DbctCollectorTask $true
+    Write-DbctTaskRow 'Execucao' $DbctRunnerTask ($config -and $config.profileId)
+    if (Test-Path -LiteralPath $DbctOutput -PathType Leaf) {
+        $item = Get-Item -LiteralPath $DbctOutput
+        $age = [int]((Get-Date) - $item.LastWriteTime).TotalSeconds
+        $content = [IO.File]::ReadAllLines($DbctOutput)
+        $ok = @($content | Where-Object { $_ -match '^dbct_collection_success 1$' }).Count -gt 0
+        $active = @($content | Where-Object { $_ -match '^dbct_run_active 1$' }).Count -gt 0
+        $kind = if ($ok -and $age -lt 90) { 'ok' } elseif ($ok) { 'warn' } else { 'err' }
+        $text = if ($ok) { "coleta OK, atualizado ha ${age}s" } else { "ultima coleta falhou (ha ${age}s)" }
+        if ($ok -and -not $active) { $text += ', nenhuma execucao ativa'; $kind = 'warn' }
+        Write-UiRow 'Saida' $kind $text
+    } else {
+        Write-UiRow 'Saida' 'err' 'dbct.prom ausente'
+    }
+    Write-UiRow 'Logs' 'none' "$LogDir\dbct-collector-*.log e dbct-runner-*.log (retencao 14 dias)"
 }
 
 # Tarefa agendada e ultimo arquivo gerado pelo coletor SQL Anywhere.
@@ -434,6 +486,7 @@ function Show-AlloyDiagnostics {
 
     if (Test-HyperVModule) { Show-InventoryDiagnostics }
     if (Test-SqlAnywhereModule) { Show-SqlAnywhereDiagnostics }
+    if (Test-DbctModule) { Show-DbctDiagnostics }
     if (Test-HeartbeatConfigured) { Show-HeartbeatDiagnostics }
 
     Write-UiSection 'CONECTIVIDADE'
@@ -452,6 +505,10 @@ function Show-AlloyDiagnostics {
     }
     if (Test-SqlAnywhereModule) {
         Write-Query 'SQL Anywhere' $GrafanaDsMetrics "sqlanywhere_collection_success{job=`"integrations/sqlanywhere`",host=`"$hostName`"}"
+    }
+    if (Test-DbctModule) {
+        Write-Query 'DBCT' $GrafanaDsMetrics "dbct_collection_success{job=`"integrations/dbconnectiontester`",host=`"$hostName`"}"
+        Write-Query 'DBCT falhas' $GrafanaDsMetrics "sum by (stage, code) (increase(dbct_stage_failures_total{host=`"$hostName`"}[5m]))"
     }
     if (Test-HeartbeatConfigured) {
         Write-Query 'Heartbeat' $GrafanaDsLogs "{job=`"alloy-heartbeat`",host=`"$hostName`"} | logfmt"

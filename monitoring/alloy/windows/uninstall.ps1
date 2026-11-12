@@ -65,6 +65,9 @@ $service = Get-AlloyService
 $uninstaller = Find-AlloyUninstaller
 $inventoryTask = Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -ErrorAction SilentlyContinue
 $sqlTask = Get-ScheduledTask -TaskPath $SqlTaskPath -TaskName $SqlTaskName -ErrorAction SilentlyContinue
+$dbctTasks = @(foreach ($name in @($DbctCollectorTask, $DbctRunnerTask)) {
+    Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $name -ErrorAction SilentlyContinue
+})
 $heartbeatTask = Get-HeartbeatTask
 
 if ($Purge) {
@@ -73,6 +76,7 @@ if ($Purge) {
     elseif ($service) { $targets += 'servico Alloy' }
     if ($inventoryTask) { $targets += "tarefa agendada $InventoryTaskPath$InventoryTaskName" }
     if ($sqlTask) { $targets += "tarefa agendada $SqlTaskPath$SqlTaskName" }
+    foreach ($task in $dbctTasks) { $targets += "tarefa agendada $($task.TaskPath)$($task.TaskName)" }
     if ($heartbeatTask) { $targets += "tarefa agendada $HeartbeatTaskPath$HeartbeatTaskName (heartbeat)" }
     foreach ($path in @($Base, $InstallDir, $AlloyCtlDir, $AlloyInstallerDir)) {
         if (Test-Path -LiteralPath $path) { $targets += $path }
@@ -113,6 +117,22 @@ if ($inventoryTask) {
 if ($sqlTask) {
     Write-Log 'Removendo a tarefa agendada do coletor SQL Anywhere...'
     Unregister-ScheduledTask -TaskPath $SqlTaskPath -TaskName $SqlTaskName -Confirm:$false
+}
+# DBCT: a execucao continua para junto (o dbct iniciado por ela tambem; a
+# execucao fica Running e o DBCT a marca como Interrupted no proximo inicio).
+foreach ($task in $dbctTasks) {
+    Write-Log "Removendo a tarefa agendada $($task.TaskName)..."
+    if ([string]$task.State -eq 'Running') { Stop-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName -ErrorAction SilentlyContinue }
+    Unregister-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName -Confirm:$false
+}
+if ($dbctTasks.Count -gt 0) {
+    try {
+        $runner = [IO.File]::ReadAllText((Join-Path $DbctState 'runner.json')) | ConvertFrom-Json
+        if ($runner.pid) {
+            Get-Process -Id ([int]$runner.pid) -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'dbct' } |
+                Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+    } catch { }
 }
 
 # Heartbeat: a tarefa sai junto com o Alloy (desinstalacao intencional); a

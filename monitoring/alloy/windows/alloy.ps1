@@ -15,12 +15,13 @@ de cada operacao. Sem Administrador, pede elevacao (UAC) e abre em nova janela.
 
 Comandos:
   install      credencial (se ausente) + instalacao/reaplicacao
-               [-Perfil auto|servidor|estacao] [-Modules auto|none|hyperv,sqlanywhere] [-Upgrade]
+               [-Perfil auto|servidor|estacao] [-Modules auto|none|hyperv,sqlanywhere,dbct] [-Upgrade]
   credentials  apenas o setup da credencial
   check        testa a credencial gravada (OAuth2 + Loki), sem alterar nada
   rotate       substitui a credencial e reinicia o Alloy
-  modules      hyperv|sqlanywhere|none: conjunto completo dos modulos
-               opcionais (separados por virgula; os nao listados saem)
+  modules      hyperv|sqlanywhere|dbct|none: conjunto completo dos modulos
+               opcionais (separados por virgula; os nao listados saem).
+               dbct (DB Connection Tester) tambem vale no perfil estacao
   upgrade      atualiza o Alloy
   status       diagnostico (servico, eventos, conectividade, consultas)
   uninstall    remove o Alloy, mantendo credencial, configuracao e o alloyctl [-Yes]
@@ -38,8 +39,8 @@ para as proximas execucoes.
 
 .PARAMETER Perfil
 servidor: job integrations/windows, com alertas. estacao: maquina descartavel,
-job integrations/windows-desktop, sem alertas, sem modulos opcionais e sem
-heartbeat. auto (padrao): mantem o perfil instalado; na primeira instalacao,
+job integrations/windows-desktop, sem alertas, sem os modulos Hyper-V e SQL
+Anywhere e sem heartbeat. auto (padrao): mantem o perfil instalado; na primeira instalacao,
 estacao em Windows de cliente (10/11) e servidor no Windows Server.
 
 .PARAMETER NoUpdate
@@ -84,8 +85,8 @@ if ($Command -eq 'help') { Get-Help $PSCommandPath -Detailed; return }
 $Modules = @($Modules | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 if ($Modules.Count -eq 0) { $Modules = @('auto') }
 foreach ($module in $Modules) {
-    if ($module -notin @('auto', 'hyperv', 'sqlanywhere', 'none')) {
-        throw "Modulo invalido: $module (use auto, hyperv, sqlanywhere ou none)."
+    if ($module -notin @('auto', 'hyperv', 'sqlanywhere', 'dbct', 'none')) {
+        throw "Modulo invalido: $module (use auto, hyperv, sqlanywhere, dbct ou none)."
     }
 }
 if (-not $Ref -and $env:ALLOY_REF) { $Ref = $env:ALLOY_REF }
@@ -503,11 +504,11 @@ try {
     # Selection e o conjunto completo dos modulos opcionais desejados.
     function Invoke-Modules([string[]]$Selection) {
         if (-not $Selection -or $Selection -contains 'auto') {
-            throw 'Use: modules hyperv|sqlanywhere|none (varios separados por virgula).'
+            throw 'Use: modules hyperv|sqlanywhere|dbct|none (varios separados por virgula).'
         }
         if (-not (Test-CredentialPresent)) { throw 'Credencial ausente; execute a instalacao primeiro.' }
-        if ((Test-Estacao) -and @($Selection | Where-Object { $_ -ne 'none' }).Count -gt 0) {
-            throw 'Modulos opcionais nao se aplicam ao perfil estacao.'
+        if ((Test-Estacao) -and @($Selection | Where-Object { $_ -in @('hyperv', 'sqlanywhere') }).Count -gt 0) {
+            throw 'Hyper-V e SQL Anywhere nao se aplicam ao perfil estacao.'
         }
         Invoke-Installer @{ Modules = $Selection }
     }
@@ -517,6 +518,7 @@ try {
         $set = @()
         if (Test-HyperVModule) { $set += 'hyperv' }
         if (Test-SqlAnywhereModule) { $set += 'sqlanywhere' }
+        if (Test-DbctModule) { $set += 'dbct' }
         if ($set -contains $Name) { $set = @($set | Where-Object { $_ -ne $Name }) } else { $set += $Name }
         if ($set.Count -eq 0) { $set = @('none') }
         Invoke-Modules $set
@@ -525,6 +527,11 @@ try {
     function Invoke-ReconfigureSqlAnywhere {
         if (-not (Test-CredentialPresent)) { throw 'Credencial ausente; execute a instalacao primeiro.' }
         Invoke-Installer @{ ReconfigureSqlAnywhere = $true }
+    }
+
+    function Invoke-ReconfigureDbct {
+        if (-not (Test-CredentialPresent)) { throw 'Credencial ausente; execute a instalacao primeiro.' }
+        Invoke-Installer @{ ReconfigureDbct = $true }
     }
 
     function Invoke-Upgrade {
@@ -662,18 +669,30 @@ try {
                 if (-not $sqlPresent) { $labelS += ' (ausente)'; $colorS = 'DarkGray' }
             }
             $color3 = if ($sqlActive) { '' } else { 'DarkGray' }
+            # Estacao: so o DBCT; Hyper-V e SQL Anywhere aparecem apenas para desativar.
+            $estacao = Test-Estacao
+            if ($estacao -and -not (Test-HyperVModule)) { $labelH = 'Hyper-V (so servidor)'; $colorH = 'DarkGray' }
+            if ($estacao -and -not $sqlActive) { $labelS = 'SQL Anywhere (so servidor)'; $colorS = 'DarkGray' }
+            $dbctActive = Test-DbctModule
+            $labelD = if ($dbctActive) { 'Desativar DBCT' } else { 'Ativar DBCT' }
+            $color5 = if ($dbctActive) { '' } else { 'DarkGray' }
 
             Clear-UiScreen
             Show-AlloyHeader
             Write-UiColumns 'MODULOS OPCIONAIS' 'White' '' ''
             Write-UiColumns " [1] $labelH" $colorH ' [3] Reconfigurar SQL Anywhere' $color3
             Write-UiColumns " [2] $labelS" $colorS '' ''
+            Write-Host ''
+            Write-UiColumns 'DB CONNECTION TESTER' 'White' '' ''
+            Write-UiColumns " [4] $labelD" '' ' [5] Reconfigurar DBCT' $color5
             Write-UiRule '-'
             Stop-UiFrame
             switch (Read-UiKey 'Tecle a opcao (0 volta)') {
-                '1' { Invoke-Screen $labelH { Invoke-ToggleModule 'hyperv' } }
-                '2' { Invoke-Screen $labelS { Invoke-ToggleModule 'sqlanywhere' } }
+                '1' { if (-not $estacao -or (Test-HyperVModule)) { Invoke-Screen $labelH { Invoke-ToggleModule 'hyperv' } } }
+                '2' { if (-not $estacao -or $sqlActive) { Invoke-Screen $labelS { Invoke-ToggleModule 'sqlanywhere' } } }
                 '3' { if ($sqlActive) { Invoke-Screen 'Reconfigurar SQL Anywhere' { Invoke-ReconfigureSqlAnywhere } } }
+                '4' { Invoke-Screen $labelD { Invoke-ToggleModule 'dbct' } }
+                '5' { if ($dbctActive) { Invoke-Screen 'Reconfigurar DBCT' { Invoke-ReconfigureDbct } } }
                 { $_ -in @('0', 'q', 'Q', 'ESC') } { return }
             }
         }
@@ -688,11 +707,10 @@ try {
             $label1 = if ($installed) { 'Reaplicar configuracao' } else { 'Instalar Alloy' }
             $label5 = if (Test-CredentialPresent) { 'Rotacionar' } else { 'Configurar' }
             $color1 = if ($default) { 'Green' } else { '' }
-            # Estacao: modulos opcionais e heartbeat so para remover o que ja existir.
+            # Estacao: heartbeat so para remover o que ja existir; nos modulos, o
+            # DBCT vale para estacoes (Hyper-V e SQL Anywhere so para remover).
             $estacao = Test-Estacao
-            $modulesActive = (Test-HyperVModule) -or (Test-SqlAnywhereModule)
-            $label2 = 'Modulos opcionais'; $color2 = ''
-            if ($estacao -and -not $modulesActive) { $label2 = 'Modulos (so servidor)'; $color2 = 'DarkGray' }
+            $label2 = 'Modulos opcionais'; $color2 = '' 
             $label9 = if (Test-HeartbeatConfigured) { 'Heartbeat' } else { 'Configurar heartbeat' }
             $color9 = ''
             if ($estacao -and -not (Test-HeartbeatConfigured)) { $label9 = 'Heartbeat (so servidor)'; $color9 = 'DarkGray' }
@@ -714,11 +732,7 @@ try {
             if ($choice -eq '') { $choice = $default }
             switch ($choice) {
                 '1' { Invoke-Screen $label1 { Invoke-Install } }
-                '2' {
-                    if ($estacao -and -not $modulesActive) {
-                        Invoke-Screen 'Modulos opcionais' { throw 'Modulos opcionais nao se aplicam ao perfil estacao.' }
-                    } else { Show-ModulesMenu }
-                }
+                '2' { Show-ModulesMenu }
                 '3' { Invoke-Screen 'Atualizar Alloy' { Invoke-Upgrade } }
                 '4' { Invoke-Screen 'Testar credencial' { Invoke-Check } }
                 '5' {

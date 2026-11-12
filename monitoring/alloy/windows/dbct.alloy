@@ -1,0 +1,38 @@
+// Modulo opcional DB Connection Tester (DBCT) para hosts Windows, servidor ou
+// estacao. Metricas geradas a cada 30 s pela tarefa agendada
+// "\GrafanaLabs\Alloy DBCT Collector" (scripts\dbct-collector.ps1) em
+// textfile\dbct\dbct.prom, em job proprio. A execucao continua do DBCT roda na
+// tarefa "\GrafanaLabs\Alloy DBCT Runner" (scripts\dbct-runner.ps1), iniciada
+// com o Windows. Requer Alloy v1.11+ (bloco textfile). O arquivo base
+// (config.alloy ou desktop.alloy) fornece prometheus.remote_write.central.
+
+prometheus.exporter.windows "dbct" {
+  enabled_collectors = ["textfile"]
+
+  textfile {
+    directories = ["C:\\ProgramData\\GrafanaLabs\\Alloy\\textfile\\dbct"]
+  }
+}
+
+discovery.relabel "dbct" {
+  targets = prometheus.exporter.windows.dbct.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "integrations/dbconnectiontester"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = string.to_lower(constants.hostname)
+  }
+  rule {
+    target_label = "host"
+    replacement  = string.to_lower(constants.hostname)
+  }
+}
+
+prometheus.scrape "dbct" {
+  targets         = discovery.relabel.dbct.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
