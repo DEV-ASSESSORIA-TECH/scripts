@@ -189,11 +189,11 @@ Os mesmos comandos valem para `alloyctl` e para o ponto de entrada baixado
 
 | Linux | Windows | Ação |
 |-------|---------|------|
-| `install [--modules docker\|none] [--upgrade]` | `install [-Perfil servidor\|estacao] [-Modules hyperv,sqlanywhere,dbct\|none] [-Upgrade]` | credencial (se ausente) + instalação |
+| `install [--modules docker\|none] [--upgrade]` | `install [-Perfil servidor\|estacao] [-Modules hyperv,sqlanywhere,mysql,dbct\|none] [-Upgrade]` | credencial (se ausente) + instalação |
 | `credentials` | `credentials` | só o setup da credencial |
 | `check` | `check` | testa a credencial gravada, sem alterar nada |
 | `rotate` | `rotate` | troca a credencial e reinicia o Alloy |
-| `modules docker\|none` | `modules hyperv,sqlanywhere,dbct\|none` | define os módulos opcionais (os não listados são desativados) |
+| `modules docker\|none` | `modules hyperv,sqlanywhere,mysql,dbct\|none` | define os módulos opcionais (os não listados são desativados) |
 | `upgrade` | `upgrade` | atualiza o Alloy |
 | `status` | `status` | diagnóstico |
 | `uninstall [--yes]` | `uninstall [-Yes]` | remove o Alloy, mantendo credencial, configuração e o `alloyctl` |
@@ -219,7 +219,7 @@ Os mesmos comandos valem para `alloyctl` e para o ponto de entrada baixado
 | `uninstall.*` | desinstalação e limpeza completa |
 | `config.alloy` | configuração base do sistema |
 | `desktop.alloy` | configuração base do perfil estação (Windows), no lugar do `config.alloy` |
-| `docker.alloy` / `hyperv.alloy` / `sqlanywhere.alloy` / `dbct.alloy` | módulos opcionais |
+| `docker.alloy` / `hyperv.alloy` / `sqlanywhere.alloy` / `mysql.alloy` / `dbct.alloy` | módulos opcionais |
 | `hypervisor-inventory.ps1` | inventário de VMs do módulo Hyper-V (tarefa agendada) |
 | `sqlanywhere-collector.ps1` | coletor do módulo SQL Anywhere (tarefa agendada) |
 | `dbct-collector.ps1` | coletor do módulo DB Connection Tester (tarefa agendada) |
@@ -240,7 +240,7 @@ dashboards de servidores, que sempre fixam o job:
 | Logs | `windows-eventlog` | `windows-desktop-eventlog` (só crítico, erro e aviso) |
 | Coletores | inclui `service` | sem `service`; scrape de 60 s |
 | Credencial | `alloy-<hostname>` | compartilhada: `alloy-estacoes` |
-| Módulos opcionais e heartbeat | disponíveis | só o módulo DBCT |
+| Módulos opcionais e heartbeat | disponíveis | só os módulos MySQL e DBCT |
 | Alertas | sim | nenhum |
 
 Na primeira instalação o perfil é detectado: estação no Windows de cliente
@@ -249,7 +249,7 @@ continuar; na automação, use `alloyctl install -Perfil estacao`. Depois,
 reaplicar e atualizar mantêm o perfil instalado. Trocar de perfil é
 `alloyctl install -Perfil <outro>`: o arquivo base do outro perfil é removido
 (com o mesmo rollback) e, ao virar estação, os módulos Hyper-V e SQL Anywhere
-ativos são desativados (o DBCT é mantido). No menu, Hyper-V, SQL Anywhere e
+ativos são desativados (MySQL e DBCT são mantidos). No menu, Hyper-V, SQL Anywhere e
 **[9] Heartbeat** aparecem como "(so servidor)" e só servem para remover o que
 já existia.
 
@@ -294,14 +294,15 @@ ninguém vê.
 
 Na instalação (`-Modules auto`, padrão), os módulos já ativos são mantidos e os
 detectados são oferecidos (só em terminal interativo). `-Modules` com uma lista
-(`hyperv`, `sqlanywhere`, `dbct` ou combinações, como `hyperv,sqlanywhere`)
+(`hyperv`, `sqlanywhere`, `mysql`, `dbct` ou combinações, como `hyperv,sqlanywhere`)
 define o conjunto completo: os não listados são desativados; `none` desativa
 todos. No menu, **[2] Módulos opcionais** liga e desliga cada um sem afetar os
 outros. O DBCT nunca é oferecido automaticamente: ative-o pelo menu ou com
 `-Modules dbct`.
 
 Cada módulo com coletor próprio grava em um subdiretório de `textfile\` e o
-Alloy lê só esse subdiretório, em job próprio.
+Alloy lê só esse subdiretório, em job próprio. O MySQL não tem coletor: usa o
+exportador embutido do Alloy.
 
 ## Módulo Hyper-V
 
@@ -381,6 +382,115 @@ Para usar outro protocolo ou porta, edite `links` no `config.json` (sintaxe do
 parâmetro `LINKS` do SQL Anywhere); o coletor relê o arquivo a cada execução. Desativar o módulo remove a
 tarefa, o script, a saída e os logs; a configuração fica para reativar sem
 digitar de novo.
+
+## Módulo MySQL
+
+Para servidores Windows com MySQL (testado com o 5.5) ou MariaDB, uma
+instância por máquina. Detectado na instalação por serviço ou processo
+`mysqld.exe`/`mariadbd.exe` e oferecido no perfil servidor; no perfil estação
+vale também, mas só ativado pelo menu ou com `-Modules mysql`. Para trocar
+usuário, senha ou porta, ou reler os caminhos dos logs depois de mudar a
+configuração do MySQL: **[2] Módulos opcionais → [7] Reconfigurar MySQL** (ou
+`install.ps1 -ReconfigureMysql`).
+
+| Parte | Onde | O que faz |
+|-------|------|-----------|
+| Métricas | `config\mysql.alloy` (exportador embutido do Alloy), job `integrations/mysql` | `SHOW GLOBAL STATUS`, `SHOW GLOBAL VARIABLES` e threads por estado (`information_schema.PROCESSLIST`), a cada 30 s |
+| Logs | `mysql.alloy`, job `mysql` no Loki | error log (`log_type="error"`, com `level` = `error`, `warning` ou `note`) e slow query log (`log_type="slow"`, uma entrada por consulta) |
+
+Sem tarefa agendada nem script: o Alloy conecta direto no MySQL
+(`127.0.0.1`, TCP). Só os coletores `global_status`, `global_variables` e
+`info_schema.processlist` ficam ativos: o padrão do exportador inclui o
+`slave_status`, que usa `SHOW REPLICA STATUS` e falha no 5.5.
+
+### Usuário de monitoramento
+
+Nome padrão **`alloy`**, o mesmo em todos os servidores. Precisa só do
+privilégio `PROCESS` (ver as conexões de outros usuários); não lê nenhuma
+tabela. Crie com um administrador do MySQL, trocando a senha:
+
+```sql
+CREATE USER 'alloy'@'localhost' IDENTIFIED BY 'SENHA';
+CREATE USER 'alloy'@'127.0.0.1' IDENTIFIED BY 'SENHA';
+GRANT PROCESS ON *.* TO 'alloy'@'localhost' WITH MAX_USER_CONNECTIONS 3;
+GRANT PROCESS ON *.* TO 'alloy'@'127.0.0.1' WITH MAX_USER_CONNECTIONS 3;
+```
+
+As duas contas cobrem o MySQL com e sem resolução de nomes
+(`skip-name-resolve`): a conexão chega como `127.0.0.1` ou como `localhost`.
+`MAX_USER_CONNECTIONS 3` impede que o monitoramento ocupe conexões do sistema.
+Para conferir: `SHOW GRANTS FOR 'alloy'@'127.0.0.1';`. Para trocar a senha
+(depois, **Reconfigurar MySQL**; sintaxe do 5.5 e 5.6, no 5.7+ use
+`ALTER USER ... IDENTIFIED BY`):
+
+```sql
+SET PASSWORD FOR 'alloy'@'localhost' = PASSWORD('NOVA');
+SET PASSWORD FOR 'alloy'@'127.0.0.1' = PASSWORD('NOVA');
+```
+
+### Ativação
+
+Na ativação, o instalador pergunta usuário (padrão `alloy`), porta (padrão
+3306), o `mysql.exe` (sugere o da pasta `bin` do serviço) e a senha, e **testa
+a conexão antes de gravar** com o `mysql.exe`, pela mesma rota do Alloy
+(TCP em `127.0.0.1`, sem ler o `my.ini`; senha pelo ambiente, nunca na linha
+de comando). Na mesma conexão lê do próprio servidor `@@log_error`,
+`@@slow_query_log`, `@@slow_query_log_file` e `@@log_output`: os logs lidos
+são os que o MySQL realmente usa. Ao final, confere pelo Alloy que o
+exportador conectou (`mysql_up 1`).
+
+### Logs
+
+- **Error log**: lido se o arquivo existir. Linhas sem data (detalhes de
+  deadlock, falhas do InnoDB) entram na entrada anterior. `level`: `error`
+  (`[ERROR]`, erros e asserções do InnoDB, `got exception`), `warning`
+  (`[Warning]`, deadlocks) ou `note` (o resto).
+- **Slow query log**: lido só com `slow_query_log=ON` e `log_output` com
+  `FILE`. Uma entrada por consulta (de `# User@Host:` até o SQL), com
+  `Query_time`, `Lock_time`, `Rows_sent` e `Rows_examined`. As linhas
+  `# Time:` e o cabeçalho de cada início do servidor são descartados.
+- A primeira leitura começa do fim de cada arquivo (o histórico não é
+  reenviado); depois a posição fica em `data\`. O horário das entradas é o da
+  leitura (segundos depois da gravação).
+
+O módulo **não altera** a configuração do MySQL. Para ter consultas lentas e
+deadlocks no Loki, ligue no `my.ini` (seção `[mysqld]`) e reinicie o serviço
+na janela do sistema; ou, sem reiniciar, com `SET GLOBAL` (vale até o próximo
+reinício):
+
+```ini
+slow_query_log = 1
+long_query_time = 2
+innodb_print_all_deadlocks = 1
+```
+
+```sql
+SET GLOBAL slow_query_log = 1;
+SET GLOBAL long_query_time = 2;
+SET GLOBAL innodb_print_all_deadlocks = 1;
+```
+
+O `long_query_time` define o que é "lento"; 2 s é um ponto de partida.
+`log_slow_queries` é o nome antigo do `slow_query_log` (5.0/5.1). Depois de
+ligar, use **Reconfigurar MySQL** para incluir o arquivo.
+
+### Arquivos
+
+| Diretório | Arquivos | Ciclo de vida |
+|---|---|---|
+| `config\` | `mysql.alloy` | substituído a cada reaplicação; removido ao desativar |
+| `data\mysql\` | `dsn` (`usuario:senha@tcp(host:porta)/`, lido pelo Alloy como segredo) e `config.json` (host, porta, usuário, `mysql.exe` e logs lidos) | mantidos ao desativar o módulo ou desinstalar; removidos na limpeza completa |
+
+A senha não usa DPAPI, como no SQL Anywhere: quem a lê é o próprio Alloy
+(`local.file` com `is_secret`), que não decifra DPAPI. O arquivo fica só com
+a ACL de `data\` (SYSTEM e Administradores) e não aparece na configuração, na
+interface do Alloy nem nos logs. O Alloy relê `dsn` e `config.json` sozinho:
+reconfigurar não reinicia o serviço. Para outra porta ou host, prefira
+**Reconfigurar MySQL** (testa antes); editar os dois arquivos à mão também
+funciona.
+
+No diagnóstico (**[6]**), a seção MYSQL mostra o alvo, se o exportador está
+conectado (com a versão), coletores com falha e os logs lidos.
 
 ## Módulo DB Connection Tester
 
