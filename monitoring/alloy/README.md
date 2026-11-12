@@ -403,7 +403,9 @@ CLI do DBCT.) Requer um DBCT com `run status` e `history cycles`, posterior à 3
 Ative em **[2] Módulos opcionais > [4] Ativar DBCT** (ou `-Modules dbct`). A
 configuração pergunta, sugerindo o que encontrar na máquina, o `dbct.exe` (MSI por
 máquina ou por usuário, PATH ou portátil) e a pasta do banco do DBCT, a que contém
-o `data.db`. Avisa se o banco não tiver execução ativa nem automática.
+o `data.db`. A primeira sugestão é a pasta da execução automática do DBCT (por
+exemplo `C:\ProgramData\DBConnectionTester\Monitor\mysql-erp`); depois vêm as
+demais pastas de `Monitor`, a compartilhada, as locais e a portátil. Avisa se o banco não tiver execução ativa nem automática.
 **[5] Reconfigurar DBCT** (ou `install.ps1 -ReconfigureDbct`) pergunta de novo.
 
 | Parte | Onde | O que faz |

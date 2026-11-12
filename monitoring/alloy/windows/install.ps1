@@ -566,10 +566,22 @@ function Find-DbctExecutables {
     return @($found | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -Unique)
 }
 
-# Pastas com data.db: compartilhada, locais de cada usuario e portatil (Data
-# ao lado do dbct.exe).
+# Pastas com data.db, na ordem em que sao sugeridas: as das execucoes
+# automaticas do DBCT (tarefas "\DB Connection Tester\...", o caso tipico de
+# monitoramento), as de ProgramData\DBConnectionTester\Monitor\<nome>, a
+# compartilhada, as locais de cada usuario e a portatil (Data ao lado do dbct.exe).
 function Find-DbctDataDirs([string]$Dbct) {
-    $found = @(Join-Path $env:ProgramData 'DBConnectionTester')
+    $found = @()
+    foreach ($task in @(Get-ScheduledTask -TaskPath '\DB Connection Tester\' -ErrorAction SilentlyContinue)) {
+        foreach ($action in @($task.Actions)) {
+            if ([string]$action.Arguments -match '--data-dir\s+(?:"([^"]+)"|(\S+))') {
+                $found += $(if ($Matches[1]) { $Matches[1] } else { $Matches[2] }).TrimEnd('\')
+            }
+        }
+    }
+    $monitor = Join-Path $env:ProgramData 'DBConnectionTester\Monitor'
+    $found += @(Get-ChildItem -LiteralPath $monitor -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+    $found += Join-Path $env:ProgramData 'DBConnectionTester'
     $users = Join-Path $env:SystemDrive 'Users'
     $found += @(Get-ChildItem -Path (Join-Path $users '*\AppData\Local\DBConnectionTester') -Directory -ErrorAction SilentlyContinue |
         ForEach-Object { $_.FullName })
