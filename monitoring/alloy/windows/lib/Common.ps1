@@ -20,6 +20,7 @@ $AlloyCtlDir = Join-Path $env:ProgramFiles 'AssessoriaTech\alloyctl'
 $AlloyInstallerDir = Join-Path $env:ProgramData 'AssessoriaTech\alloy-installer'
 $HyperVFile  = Join-Path $ConfigDir 'hyperv.alloy'
 $SqlAnywhereFile = Join-Path $ConfigDir 'sqlanywhere.alloy'
+$MysqlFile   = Join-Path $ConfigDir 'mysql.alloy'
 $DbctFile    = Join-Path $ConfigDir 'dbct.alloy'
 # Arquivo base de cada perfil (ver install.ps1 -Perfil).
 $ServerFile  = Join-Path $ConfigDir 'config.alloy'
@@ -34,6 +35,9 @@ $SqlState          = Join-Path $DataDir 'sqlanywhere'
 $SqlOutput         = Join-Path $Base 'textfile\sqlanywhere\sqlanywhere.prom'
 $SqlTaskPath       = '\GrafanaLabs\'
 $SqlTaskName       = 'Alloy SQL Anywhere'
+# Modulo MySQL: exportador embutido do Alloy, sem tarefa (ver install.ps1).
+$MysqlState        = Join-Path $DataDir 'mysql'
+$MysqlMetricsUrl   = 'http://127.0.0.1:12345/api/v0/component/prometheus.exporter.mysql.mysql/metrics'
 # Modulo DB Connection Tester: so o coletor (ver install.ps1).
 $DbctState         = Join-Path $DataDir 'dbct'
 $DbctOutput        = Join-Path $Base 'textfile\dbct\dbct.prom'

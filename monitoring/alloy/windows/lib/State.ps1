@@ -44,6 +44,7 @@ function Test-CredentialPresent {
 }
 function Test-HyperVModule { Test-Path -LiteralPath $HyperVFile -PathType Leaf }
 function Test-SqlAnywhereModule { Test-Path -LiteralPath $SqlAnywhereFile -PathType Leaf }
+function Test-MysqlModule { Test-Path -LiteralPath $MysqlFile -PathType Leaf }
 function Test-DbctModule { Test-Path -LiteralPath $DbctFile -PathType Leaf }
 function Test-HeartbeatConfigured {
     (Test-Path -LiteralPath $HeartbeatUrlFile -PathType Leaf) -or ($null -ne (Get-HeartbeatTask))
@@ -233,6 +234,7 @@ function Show-AlloyHeader {
     $modules = 'Windows'
     if (Test-HyperVModule) { $modules += ' + Hyper-V' }
     if (Test-SqlAnywhereModule) { $modules += ' + SQL Anywhere' }
+    if (Test-MysqlModule) { $modules += ' + MySQL' }
     if (Test-DbctModule) { $modules += ' + DBCT' }
     Write-UiRow 'Modulos' 'none' $modules
     $heartbeat = Get-HeartbeatStatus
@@ -397,6 +399,53 @@ function Show-SqlAnywhereDiagnostics {
     Write-UiRow 'Logs' 'none' "$LogDir\sqlanywhere-collector-*.log (retencao 14 dias)"
 }
 
+# Configuracao e conexao do modulo MySQL, pelas metricas do proprio exportador
+# do Alloy (nao ha tarefa nem arquivo intermediario).
+function Show-MysqlDiagnostics {
+    Write-UiSection 'MYSQL'
+    $config = $null
+    try { $config = [IO.File]::ReadAllText((Join-Path $MysqlState 'config.json')) | ConvertFrom-Json } catch { }
+    if ($config) {
+        Write-UiRow 'Alvo' 'none' ("$($config.user)@$($config.host):$($config.port)")
+    } else {
+        Write-UiRow 'Config' 'err' 'ausente: use Reconfigurar MySQL'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $MysqlState 'dsn') -PathType Leaf)) {
+        Write-UiRow 'Senha' 'err' 'ausente: use Reconfigurar MySQL'
+    }
+    $text = $null
+    try { $text = (Get-ReadyClient).GetStringAsync($MysqlMetricsUrl).GetAwaiter().GetResult() } catch { }
+    if (-not $text) {
+        Write-UiRow 'Conexao' 'err' 'exportador sem resposta (Alloy parado ou modulo nao carregado)'
+    } elseif ($text -match '(?m)^mysql_up 1') {
+        $version = ''
+        if ($text -match '(?m)^mysql_version_info\{[^}]*\bversion="([^"]+)"') { $version = " - MySQL $($Matches[1])" }
+        $failed = @([regex]::Matches($text, '(?m)^mysql_exporter_collector_success\{collector="([^"]+)"\} 0') | ForEach-Object { $_.Groups[1].Value })
+        if ($failed.Count -gt 0) {
+            Write-UiRow 'Conexao' 'warn' ("conectado$version; coletores com falha: " + ($failed -join ', '))
+        } else {
+            Write-UiRow 'Conexao' 'ok' "conectado$version"
+        }
+    } else {
+        Write-UiRow 'Conexao' 'err' 'mysql_up 0: senha, usuario ou servico do MySQL (veja os eventos do Alloy)'
+    }
+    $logs = @()
+    if ($config -and $config.logs) { $logs = @($config.logs) }
+    if ($logs.Count -eq 0) {
+        Write-UiRow 'Logs' 'warn' 'nenhum log do MySQL lido (Reconfigurar MySQL rele os caminhos)'
+    }
+    foreach ($entry in $logs) {
+        $path = [string]$entry.'__path__'
+        $kind = if (Test-Path -LiteralPath $path -PathType Leaf) { 'ok' } else { 'warn' }
+        $label = if ($entry.log_type -eq 'slow') { 'Slow log' } else { 'Error log' }
+        Write-UiRow $label $kind $path
+    }
+    if (-not @($logs | Where-Object { $_.log_type -eq 'slow' }).Count) {
+        Write-UiRow 'Slow log' 'none' 'desligado no MySQL (README, Modulo MySQL)'
+    }
+    Write-UiRow 'Config' 'none' "$MysqlState (so SYSTEM e Administradores)"
+}
+
 # Tarefa, ultima execucao e linha enviada ao Loki pelo heartbeat.
 function Show-HeartbeatDiagnostics {
     Write-UiSection 'HEARTBEAT (UPTIME KUMA + LOKI)'
@@ -482,6 +531,7 @@ function Show-AlloyDiagnostics {
 
     if (Test-HyperVModule) { Show-InventoryDiagnostics }
     if (Test-SqlAnywhereModule) { Show-SqlAnywhereDiagnostics }
+    if (Test-MysqlModule) { Show-MysqlDiagnostics }
     if (Test-DbctModule) { Show-DbctDiagnostics }
     if (Test-HeartbeatConfigured) { Show-HeartbeatDiagnostics }
 
@@ -501,6 +551,10 @@ function Show-AlloyDiagnostics {
     }
     if (Test-SqlAnywhereModule) {
         Write-Query 'SQL Anywhere' $GrafanaDsMetrics "sqlanywhere_collection_success{job=`"integrations/sqlanywhere`",host=`"$hostName`"}"
+    }
+    if (Test-MysqlModule) {
+        Write-Query 'MySQL' $GrafanaDsMetrics "mysql_up{job=`"integrations/mysql`",host=`"$hostName`"}"
+        Write-Query 'Logs MySQL' $GrafanaDsLogs "{job=`"mysql`",host=`"$hostName`"}"
     }
     if (Test-DbctModule) {
         Write-Query 'DBCT' $GrafanaDsMetrics "dbct_collection_success{job=`"integrations/dbconnectiontester`",host=`"$hostName`"}"

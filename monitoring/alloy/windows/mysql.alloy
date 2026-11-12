@@ -1,0 +1,127 @@
+// Modulo opcional MySQL para hosts Windows (testado com MySQL 5.5).
+// Metricas pelo exportador embutido do Alloy (prometheus.exporter.mysql), em
+// job proprio, e error log / slow query log no Loki (job mysql).
+// Configuracao gravada pelo install.ps1 em data\mysql\ (so SYSTEM e
+// Administradores):
+//   dsn          usuario:senha@tcp(host:porta)/ (segredo, nunca exibido)
+//   config.json  host, porta, usuario e os logs lidos (lista "logs")
+// O Alloy rele os dois arquivos sozinho: Reconfigurar MySQL nao reinicia o
+// servico. O config.alloy principal fornece prometheus.remote_write.central
+// e loki.write.central.
+
+local.file "mysql_dsn" {
+  filename  = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\mysql\\dsn"
+  is_secret = true
+}
+
+local.file "mysql_config" {
+  filename = "C:\\ProgramData\\GrafanaLabs\\Alloy\\data\\mysql\\config.json"
+}
+
+// Coletores fixos: o padrao do exportador inclui slave_status, que usa
+// SHOW REPLICA STATUS e falha no MySQL 5.5 a cada coleta. Requer so o
+// privilegio PROCESS (README, Modulo MySQL).
+prometheus.exporter.mysql "mysql" {
+  data_source_name = local.file.mysql_dsn.content
+  set_collectors   = ["global_status", "global_variables", "info_schema.processlist"]
+
+  info_schema.processlist {
+    processes_by_user = false
+    processes_by_host = false
+  }
+}
+
+discovery.relabel "mysql" {
+  targets = prometheus.exporter.mysql.mysql.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "integrations/mysql"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = string.to_lower(constants.hostname)
+  }
+  rule {
+    target_label = "host"
+    replacement  = string.to_lower(constants.hostname)
+  }
+}
+
+prometheus.scrape "mysql" {
+  targets         = discovery.relabel.mysql.output
+  scrape_interval = "30s"
+  forward_to      = [prometheus.relabel.mysql.receiver]
+}
+
+// So as series do MySQL e o up do scrape (saude da coleta): descarta
+// mysqld_exporter_build_info e as scrape_* geradas pelo scrape, sem uso aqui.
+prometheus.relabel "mysql" {
+  forward_to = [prometheus.remote_write.central.receiver]
+
+  rule {
+    source_labels = ["__name__"]
+    regex         = "mysql_.+|up"
+    action        = "keep"
+  }
+}
+
+// Logs: caminhos vindos do config.json (log_type error ou slow). Sem posicao
+// gravada, comeca do fim do arquivo: o historico antigo nao e reenviado.
+loki.source.file "mysql" {
+  targets       = encoding.from_json(local.file.mysql_config.content).logs
+  tail_from_end = true
+  forward_to    = [loki.process.mysql.receiver]
+}
+
+loki.process "mysql" {
+  forward_to = [loki.write.central.receiver]
+
+  stage.static_labels {
+    values = {
+      job  = "mysql",
+      host = string.to_lower(constants.hostname),
+    }
+  }
+  stage.label_drop {
+    values = ["filename"]
+  }
+
+  // Error log: uma entrada por linha com data (5.5: "AAMMDD HH:MM:SS"; 5.7+:
+  // ISO 8601); as linhas seguintes (deadlock, falha do InnoDB) entram na mesma
+  // entrada. level: error, warning (inclui deadlock) ou note.
+  stage.match {
+    selector = "{log_type=\"error\"}"
+
+    stage.multiline {
+      firstline     = "^(\\d{6}\\s+\\d{1,2}:\\d{2}:\\d{2}|\\d{4}-\\d{2}-\\d{2}[T ]\\d{2}:\\d{2}:\\d{2})"
+      max_wait_time = "3s"
+      max_lines     = 500
+    }
+    stage.template {
+      source   = "level"
+      template = "{{ if regexMatch `(?i)\\[ERROR\\]|InnoDB: (Error|Assertion|Operating system error|Fatal|Unable)|got exception|Assertion failure|\\[FATAL\\]|Fatal error` .Entry }}error{{ else if regexMatch `(?i)\\[Warning\\]|InnoDB: Warning|deadlock detected|WE ROLL BACK TRANSACTION` .Entry }}warning{{ else }}note{{ end }}"
+    }
+    stage.labels {
+      values = {
+        level = "",
+      }
+    }
+  }
+
+  // Slow query log: uma entrada por consulta, a partir de "# User@Host:".
+  // Descarta "# Time:" (gravada so quando o segundo muda, entraria na consulta
+  // anterior) e o cabecalho escrito a cada inicio do servidor.
+  stage.match {
+    selector = "{log_type=\"slow\"}"
+
+    stage.drop {
+      expression = "^(# Time: .*|.*, Version: .* started with:|Tcp port: .*|TCP Port: .*|Time\\s+Id\\s+Command\\s+Argument)\\s*$"
+    }
+    stage.multiline {
+      firstline     = "^# User@Host: "
+      max_wait_time = "3s"
+      max_lines     = 200
+    }
+  }
+}

@@ -3,11 +3,14 @@
 # Instala ou reaplica o Alloy com validacao e rollback.
 # -Modules: conjunto completo dos modulos opcionais.
 #   auto (padrao)               mantem os ativos e oferece os detectados
-#   hyperv, sqlanywhere, dbct   ativa exatamente os listados (os demais saem)
+#   hyperv, sqlanywhere, mysql, dbct
+#                               ativa exatamente os listados (os demais saem)
 #   none                        desativa todos
 #   dbct (DB Connection Tester) tambem vale no perfil estacao e nunca e
-#   oferecido automaticamente.
+#   oferecido automaticamente. mysql tambem vale no perfil estacao (sem
+#   deteccao automatica nele).
 # -ReconfigureSqlAnywhere: pede de novo servidor, banco e usuario do SQL Anywhere.
+# -ReconfigureMysql: pede de novo porta, usuario e senha do MySQL e rele os logs.
 # -ReconfigureDbct: pede de novo o dbct.exe e a pasta do banco do DBCT.
 # -Perfil: servidor (config.alloy, job integrations/windows, com alertas) ou
 #   estacao (desktop.alloy, job integrations/windows-desktop: maquina
@@ -16,9 +19,10 @@
 [CmdletBinding()]
 param(
     [switch]$Upgrade,
-    [ValidateSet('auto','hyperv','sqlanywhere','dbct','none')]
+    [ValidateSet('auto','hyperv','sqlanywhere','mysql','dbct','none')]
     [string[]]$Modules = @('auto'),
     [switch]$ReconfigureSqlAnywhere,
+    [switch]$ReconfigureMysql,
     [switch]$ReconfigureDbct,
     [ValidateSet('auto','servidor','estacao')]
     [string]$Perfil = 'auto'
@@ -76,6 +80,15 @@ $SqlDriver = 'SQL Anywhere 17'
 $SqlDefaultLinks = 'SharedMemory,TCPIP(HOST=127.0.0.1)'
 # Mesma entropia do sqlanywhere-collector.ps1.
 $SqlEntropy = [Text.Encoding]::UTF8.GetBytes('AssessoriaTech-Alloy-SQLAnywhere')
+# MySQL: exportador embutido do Alloy (sem tarefa agendada). Em data\mysql\:
+# dsn (usuario:senha@tcp(host:porta)/, lido pelo Alloy como segredo) e
+# config.json (host, porta, usuario, cliente mysql.exe e logs lidos).
+$MysqlState = Join-Path $DataDir 'mysql'
+$MysqlConfigFile = Join-Path $MysqlState 'config.json'
+$MysqlDsnFile = Join-Path $MysqlState 'dsn'
+$MysqlDefaultUser = 'alloy'
+$MysqlDefaultPort = 3306
+$MysqlMetricsUrl = 'http://127.0.0.1:12345/api/v0/component/prometheus.exporter.mysql.mysql/metrics'
 # DB Connection Tester: so o coletor (a cada 30 s). A execucao continua e do
 # proprio DBCT (dbct run ... --autostart); o modulo apenas le o banco.
 $DbctCollectorName = 'dbct-collector.ps1'
@@ -510,6 +523,220 @@ function Sync-SqlAnywhereCollector([bool]$Enabled, [string]$StagedScript) {
     Log "Coletor SQL Anywhere ativo, atualizado a cada 30 s$note."
 }
 
+# ------------------------------------------------------------------- MySQL
+
+# Servico do MySQL/MariaDB (o caminho pode vir sem .exe, com ou sem aspas).
+function Get-MysqlServices {
+    @(Get-CimInstance -ClassName Win32_Service -ErrorAction SilentlyContinue | Where-Object {
+        $_.PathName -match '(?i)\\(mysqld(-nt)?|mariadbd)(\.exe)?("|\s|$)'
+    })
+}
+
+function Test-Mysql {
+    if (@(Get-MysqlServices).Count -gt 0) { return $true }
+    return @(Get-Process -Name mysqld, mysqld-nt, mariadbd -ErrorAction SilentlyContinue).Count -gt 0
+}
+
+function Test-MysqlSettings {
+    (Test-Path -LiteralPath $MysqlConfigFile -PathType Leaf) -and (Test-Path -LiteralPath $MysqlDsnFile -PathType Leaf)
+}
+
+# Executavel de um PathName de servico: "C:\...\mysqld" --defaults-file=... MySQL
+function Get-ServiceExecutable([string]$PathName) {
+    if ($PathName -match '^\s*"([^"]+)"') { return $Matches[1] }
+    if ($PathName -match '^\s*(\S+)') { return $Matches[1] }
+    return $null
+}
+
+# Cliente mysql.exe: ao lado do mysqld do servico ou do processo, no PATH ou
+# nas pastas padrao do instalador. O primeiro e a sugestao.
+function Find-MysqlClients {
+    $dirs = @()
+    foreach ($svc in Get-MysqlServices) {
+        $exe = Get-ServiceExecutable ([string]$svc.PathName)
+        if ($exe) { $dirs += (Split-Path -Parent $exe) }
+    }
+    foreach ($proc in @(Get-Process -Name mysqld, mysqld-nt, mariadbd -ErrorAction SilentlyContinue)) {
+        try { if ($proc.Path) { $dirs += (Split-Path -Parent $proc.Path) } } catch { }
+    }
+    $found = @()
+    foreach ($dir in $dirs) {
+        foreach ($name in @('mysql.exe', 'mariadb.exe')) {
+            $candidate = Join-Path $dir $name
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) { $found += $candidate }
+        }
+    }
+    $command = Get-Command mysql.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($command) { $found += $command.Source }
+    foreach ($root in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, 'C:\mysql', 'C:\xampp')) {
+        if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
+        $found += @(Get-ChildItem -Path (Join-Path $root 'MySQL\*\bin\mysql.exe'), (Join-Path $root 'MariaDB*\bin\mysql.exe'),
+            (Join-Path $root 'bin\mysql.exe'), (Join-Path $root 'mysql\bin\mysql.exe') -File -ErrorAction SilentlyContinue |
+            ForEach-Object { $_.FullName })
+    }
+    return @($found | Where-Object { $_ } | Select-Object -Unique)
+}
+
+# Consulta pelo mysql.exe com a mesma conexao do exportador (TCP, sem os
+# arquivos de opcoes da maquina). Senha pelo ambiente (MYSQL_PWD), nunca na
+# linha de comando. Devolve as colunas da primeira linha (--raw: caminhos do
+# Windows sem escape).
+function Invoke-MysqlQuery([hashtable]$Settings, [string]$Query) {
+    $arguments = @('--no-defaults', '--protocol=TCP', "--host=$($Settings.host)", "--port=$($Settings.port)",
+        "--user=$($Settings.user)", '--connect-timeout=5', '--batch', '--raw', '--skip-column-names', "--execute=$Query")
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $Settings.client
+    $info.Arguments = (@($arguments | ForEach-Object { ConvertTo-DbctArgument $_ }) -join ' ')
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.EnvironmentVariables['MYSQL_PWD'] = $Settings.password
+    $process = [Diagnostics.Process]::Start($info)
+    try {
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(20000)) {
+            try { $process.Kill() } catch { }
+            throw 'mysql.exe nao respondeu em 20 s.'
+        }
+        $process.WaitForExit()
+        $errorText = ($stderr.GetAwaiter().GetResult()).Trim()
+        if ($process.ExitCode -ne 0) {
+            if (-not $errorText) { $errorText = "mysql.exe retornou $($process.ExitCode)." }
+            throw $errorText
+        }
+        $line = @(($stdout.GetAwaiter().GetResult()) -split "`r?`n" | Where-Object { $_ }) | Select-Object -First 1
+        if (-not $line) { throw 'mysql.exe nao devolveu resultado.' }
+        return @($line -split "`t")
+    } finally { $process.Dispose() }
+}
+
+# Caminho de log informado pelo servidor: relativo ao datadir quando nao for
+# absoluto (o 5.5 no Windows usa ".\HOST.err"); barras normalizadas.
+function Resolve-MysqlPath([string]$Path, [string]$DataDirPath) {
+    if (-not $Path -or $Path -eq 'NULL' -or $Path -eq 'stderr') { return $null }
+    $Path = $Path -replace '/', '\'
+    if (-not [IO.Path]::IsPathRooted($Path)) { $Path = Join-Path ($DataDirPath -replace '/', '\') $Path }
+    return [IO.Path]::GetFullPath($Path)
+}
+
+# Testa a conexao e le do proprio servidor a versao e os logs. Os logs vao
+# para o Loki so se o arquivo existir (error log) ou se o slow log estiver
+# ligado e em arquivo; o modulo nunca altera a configuracao do MySQL.
+function Test-MysqlConnection([hashtable]$Settings) {
+    $row = Invoke-MysqlQuery $Settings ('SELECT VERSION(), @@datadir, @@log_error, @@slow_query_log, ' +
+        '@@slow_query_log_file, @@log_output, @@long_query_time')
+    if ($row.Count -lt 7) { throw "Resposta inesperada do MySQL: $($row -join ' | ')" }
+    $result = @{ version = $row[0]; logs = @(); notes = @() }
+    $errorLog = Resolve-MysqlPath $row[2] $row[1]
+    if (-not $errorLog) {
+        $result.notes += 'Error log desligado no servidor (log_error vazio): nada a enviar ao Loki.'
+    } elseif (Test-Path -LiteralPath $errorLog -PathType Leaf) {
+        $result.logs += [ordered]@{ '__path__' = $errorLog; log_type = 'error' }
+    } else {
+        $result.notes += "Error log $errorLog nao encontrado: nao sera lido."
+    }
+    $slowOn = $row[3] -match '^(1|ON)$'
+    $toFile = $row[5] -match '(?i)FILE'
+    $slowLog = Resolve-MysqlPath $row[4] $row[1]
+    if ($slowOn -and $toFile -and $slowLog) {
+        $result.logs += [ordered]@{ '__path__' = $slowLog; log_type = 'slow' }
+        $result.notes += "Slow query log ligado (long_query_time = $($row[6]) s)."
+    } elseif (-not $slowOn) {
+        $result.notes += 'Slow query log desligado: sem consultas lentas no Loki (veja o README, Modulo MySQL).'
+    } else {
+        $result.notes += "Slow query log gravado em tabela (log_output = $($row[5])): so arquivo e lido."
+    }
+    return $result
+}
+
+# Pede porta, usuario, senha e o mysql.exe (padrao: valores gravados) e testa
+# a conexao antes de aceitar. Nada e gravado aqui: Save-MysqlSettings grava
+# depois da validacao do Alloy.
+function Read-MysqlSettings {
+    $current = $null
+    if (Test-Path -LiteralPath $MysqlConfigFile -PathType Leaf) {
+        try { $current = [IO.File]::ReadAllText($MysqlConfigFile) | ConvertFrom-Json } catch { }
+    }
+    $clients = @(Find-MysqlClients)
+    $client = if ($current -and $current.client -and (Test-Path -LiteralPath ([string]$current.client) -PathType Leaf)) {
+        [string]$current.client
+    } elseif ($clients.Count -gt 0) { $clients[0] } else { '' }
+    Write-Host ''
+    Write-Host '  Monitoramento do MySQL: informe o usuario de monitoramento (padrao alloy).'
+    Write-Host '  Ele so precisa do privilegio PROCESS; o README mostra como criar.'
+    $settings = @{
+        host = if ($current -and $current.host) { [string]$current.host } else { '127.0.0.1' }
+        port = 0
+        user = Read-Value 'Usuario de monitoramento' $(if ($current -and $current.user) { [string]$current.user } else { $MysqlDefaultUser })
+    }
+    $portText = Read-Value 'Porta do MySQL' $(if ($current -and $current.port) { [string]$current.port } else { [string]$MysqlDefaultPort })
+    $port = 0
+    if (-not [int]::TryParse($portText, [ref]$port) -or $port -lt 1 -or $port -gt 65535) { throw "Porta invalida: $portText" }
+    $settings.port = $port
+    if ($settings.user -notmatch '^[A-Za-z0-9_.$-]{1,32}$') { throw "Usuario invalido: $($settings.user)" }
+    $settings.client = Read-Value 'Cliente mysql.exe (para testar a conexao)' $client
+    if (-not (Test-Path -LiteralPath $settings.client -PathType Leaf)) { throw "mysql.exe nao encontrado: $($settings.client)" }
+    $secure = Read-Host 'Senha' -AsSecureString
+    if ($secure.Length -eq 0) { throw 'Senha e obrigatoria.' }
+    $ptr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { $settings.password = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($ptr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($ptr) }
+    if ($settings.password -match '[\r\n]') { throw 'Senha com quebra de linha nao e suportada.' }
+    Log 'Testando a conexao com o MySQL...'
+    try {
+        $probe = Test-MysqlConnection $settings
+    } catch {
+        throw "Conexao ao MySQL falhou: $($_.Exception.Message)"
+    }
+    Log "Conexao OK (MySQL $($probe.version))."
+    foreach ($entry in $probe.logs) { Log "Log enviado ao Loki ($($entry.log_type)): $($entry['__path__'])" }
+    foreach ($note in $probe.notes) { Log $note }
+    $settings.logs = $probe.logs
+    return $settings
+}
+
+# Sem DPAPI: quem le a senha e o proprio Alloy (local.file com is_secret). O
+# arquivo fica so com a ACL de data\ (SYSTEM e Administradores) e nunca aparece
+# na configuracao, na interface do Alloy ou nos logs.
+function Save-MysqlSettings([hashtable]$Settings) {
+    Ensure-Directory $MysqlState
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $dsn = '{0}:{1}@tcp({2}:{3})/' -f $Settings.user, $Settings.password, $Settings.host, $Settings.port
+    [IO.File]::WriteAllText($MysqlDsnFile, $dsn, $utf8)
+    $json = [ordered]@{
+        host   = $Settings.host
+        port   = $Settings.port
+        user   = $Settings.user
+        client = $Settings.client
+        logs   = @($Settings.logs)
+    } | ConvertTo-Json -Depth 4
+    [IO.File]::WriteAllText($MysqlConfigFile, $json, $utf8)
+    Log "MySQL: configuracao gravada em $MysqlState."
+}
+
+# Sem tarefa: so confere, pelo proprio Alloy, que o exportador conectou
+# (mysql_up 1). O Alloy rele dsn e config.json sozinho, entao uma
+# reconfiguracao sem outras mudancas tambem passa por aqui.
+function Sync-MysqlModule([bool]$Enabled) {
+    if (-not $Enabled) { return }
+    $deadline = (Get-Date).AddSeconds(75)
+    $up = $null
+    do {
+        try {
+            $text = (Get-LocalHttp).GetStringAsync($MysqlMetricsUrl).GetAwaiter().GetResult()
+            if ($text -match '(?m)^mysql_up (\d)') { $up = $Matches[1] }
+            if ($up -eq '1') { break }
+        } catch { }
+        Start-Sleep -Seconds 3
+    } while ((Get-Date) -lt $deadline)
+    if ($up -ne '1') {
+        throw "MySQL: o Alloy nao conectou ao banco (mysql_up = $(if ($up) { $up } else { 'sem valor' })). Confira o usuario e use Reconfigurar MySQL."
+    }
+    Log 'MySQL: exportador conectado (mysql_up 1); metricas a cada 30 s.'
+}
+
 # ------------------------------------------------------- DB Connection Tester
 
 # Regras do Windows para argumentos (mesmas do dbct-collector.ps1).
@@ -687,6 +914,7 @@ function Sync-ModuleTasks {
     try { Sync-HypervisorInventory $hypervEnabled $stageInventory } catch { $failures += $_.Exception.Message }
     try { Sync-SqlAnywhereCollector $sqlEnabled $stageSqlCollector } catch { $failures += $_.Exception.Message }
     try { Sync-DbctModule $dbctEnabled $stageDbctCollector } catch { $failures += $_.Exception.Message }
+    try { Sync-MysqlModule $mysqlEnabled } catch { $failures += $_.Exception.Message }
     if ($failures.Count -gt 0) { throw ($failures -join ' ') }
 }
 
@@ -707,6 +935,7 @@ function Test-HyperV {
 $HyperVModule = Join-Path $ConfigDir 'hyperv.alloy'
 $SqlAnywhereModule = Join-Path $ConfigDir 'sqlanywhere.alloy'
 $DbctModule = Join-Path $ConfigDir 'dbct.alloy'
+$MysqlModule = Join-Path $ConfigDir 'mysql.alloy'
 $Modules = @($Modules | Select-Object -Unique)
 if ($Modules.Count -gt 1 -and (($Modules -contains 'auto') -or ($Modules -contains 'none'))) {
     throw '-Modules: auto e none nao podem ser combinados com outros valores.'
@@ -734,7 +963,8 @@ if ($Perfil -eq 'estacao') {
         Write-Warning 'Heartbeat configurado: estacoes nao usam heartbeat. Remova com "alloyctl heartbeat-remove" e exclua o monitor no Kuma.'
     }
     # Sem deteccao nem pergunta: Hyper-V e SQL Anywhere ativos sao desativados
-    # abaixo. O modulo dbct vale para estacoes e segue -Modules normalmente.
+    # abaixo. Os modulos dbct e mysql valem para estacoes e seguem -Modules
+    # normalmente (auto so mantem os ativos).
     $autoModules = $false
 }
 
@@ -796,6 +1026,42 @@ if ($sqlEnabled) {
     }
 } elseif ($ReconfigureSqlAnywhere) {
     throw '-ReconfigureSqlAnywhere requer o modulo SQL Anywhere ativo.'
+}
+
+# MySQL: como o SQL Anywhere no perfil servidor (oferecido quando detectado);
+# na estacao, auto so mantem o modulo ativo.
+$mysqlEnabled = $false
+$mysqlPending = $null
+if ($Modules -contains 'mysql') {
+    if (-not (Test-Mysql)) { throw 'MySQL solicitado, mas nenhum servico ou processo mysqld/mariadbd foi encontrado.' }
+    $mysqlEnabled = $true
+} elseif ($Modules -contains 'auto') {
+    if (Test-Path -LiteralPath $MysqlModule -PathType Leaf) {
+        if (-not (Test-Mysql)) {
+            throw 'MySQL estava habilitado mas nao foi detectado. Para desativar, informe -Modules sem mysql (ex.: -Modules none).'
+        }
+        $mysqlEnabled = $true
+        Log 'Modulo MySQL existente: preservando.'
+    } elseif ($Perfil -eq 'servidor' -and (Test-Mysql)) {
+        if ([Console]::IsInputRedirected) {
+            Log 'MySQL detectado sem terminal interativo. Use -Modules mysql para habilitar.'
+        } else {
+            $answer = Read-Host 'MySQL detectado. Habilitar metricas, error log e slow query log? [S/n]'
+            if ($answer -match '^(|s|sim|y|yes)$') { $mysqlEnabled = $true }
+        }
+    }
+} elseif (Test-Path -LiteralPath $MysqlModule -PathType Leaf) {
+    Log 'Modulo MySQL sera desativado.'
+}
+if ($mysqlEnabled) {
+    if ($ReconfigureMysql -or -not (Test-MysqlSettings)) {
+        if ([Console]::IsInputRedirected) {
+            throw 'MySQL sem configuracao: execute a instalacao em um terminal interativo.'
+        }
+        $mysqlPending = Read-MysqlSettings
+    }
+} elseif ($ReconfigureMysql) {
+    throw '-ReconfigureMysql requer o modulo MySQL ativo.'
 }
 
 # DBCT: nunca oferecido automaticamente (necessidade pontual); auto mantem o
@@ -863,6 +1129,9 @@ try {
         Copy-ModuleFile $SqlCollectorName $stageSqlCollector
         Assert-ScriptSyntax $stageSqlCollector
     }
+    if ($mysqlEnabled) {
+        Copy-ModuleFile 'mysql.alloy' (Join-Path $stage 'mysql.alloy')
+    }
     $stageDbctCollector = $null
     if ($dbctEnabled) {
         Copy-ModuleFile 'dbct.alloy' (Join-Path $stage 'dbct.alloy')
@@ -872,7 +1141,7 @@ try {
     }
     if (Test-Path -LiteralPath $ConfigDir -PathType Container) {
         Get-ChildItem -LiteralPath $ConfigDir -Filter '*.alloy' -File | ForEach-Object {
-            if ($_.Name -notin @('config.alloy', 'desktop.alloy', 'hyperv.alloy', 'sqlanywhere.alloy', 'dbct.alloy')) {
+            if ($_.Name -notin @('config.alloy', 'desktop.alloy', 'hyperv.alloy', 'sqlanywhere.alloy', 'mysql.alloy', 'dbct.alloy')) {
                 Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage $_.Name)
             }
         }
@@ -902,7 +1171,7 @@ try {
     Log 'Validando a configuracao completa antes de alterar o servico...'
     & $Exe validate $stage
     if ($LASTEXITCODE -ne 0) {
-        $hint = if ($hypervEnabled -or $sqlEnabled -or $dbctEnabled) { ' Os modulos Hyper-V, SQL Anywhere e DBCT requerem Alloy v1.11+ (use Atualizar Alloy).' } else { '' }
+        $hint = if ($hypervEnabled -or $sqlEnabled -or $mysqlEnabled -or $dbctEnabled) { ' Os modulos Hyper-V, SQL Anywhere, MySQL e DBCT requerem Alloy v1.11+ (use Atualizar Alloy).' } else { '' }
         throw "Configuracao invalida. Instalacao ativa preservada.$hint"
     }
 
@@ -930,6 +1199,10 @@ try {
         Ensure-Directory $SqlOutputDir
         Ensure-Directory $SqlState
         if ($sqlPending) { Save-SqlAnywhereSettings $sqlPending }
+    }
+    if ($mysqlEnabled) {
+        Ensure-Directory $MysqlState
+        if ($mysqlPending) { Save-MysqlSettings $mysqlPending }
     }
     if ($dbctEnabled) {
         Ensure-Directory $DbctOutputDir
@@ -972,6 +1245,12 @@ try {
     } else {
         Test-Path -LiteralPath $SqlAnywhereModule
     }
+    $mysqlSource = Join-Path $stage 'mysql.alloy'
+    $mysqlChanged = if ($mysqlEnabled) {
+        -not (Same-File $mysqlSource $MysqlModule)
+    } else {
+        Test-Path -LiteralPath $MysqlModule
+    }
     $dbctSource = Join-Path $stage 'dbct.alloy'
     $dbctChanged = if ($dbctEnabled) {
         -not (Same-File $dbctSource $DbctModule)
@@ -979,7 +1258,7 @@ try {
         Test-Path -LiteralPath $DbctModule
     }
     $argsChanged = ($priorArgs -join [char]10) -cne ($argsNew -join [char]10)
-    $mustApply = $configChanged -or $moduleChanged -or $sqlChanged -or $dbctChanged -or $argsChanged -or $Upgrade -or -not $priorRunning -or -not $priorAuto
+    $mustApply = $configChanged -or $moduleChanged -or $sqlChanged -or $mysqlChanged -or $dbctChanged -or $argsChanged -or $Upgrade -or -not $priorRunning -or -not $priorAuto
     if (-not $mustApply) {
         Log 'Nenhuma alteracao na configuracao; servico mantido em execucao.'
         Sync-ModuleTasks
@@ -993,6 +1272,7 @@ try {
     }
     if (Test-Path -LiteralPath $HyperVModule) { Copy-Item -LiteralPath $HyperVModule -Destination (Join-Path $backup 'hyperv.alloy') }
     if (Test-Path -LiteralPath $SqlAnywhereModule) { Copy-Item -LiteralPath $SqlAnywhereModule -Destination (Join-Path $backup 'sqlanywhere.alloy') }
+    if (Test-Path -LiteralPath $MysqlModule) { Copy-Item -LiteralPath $MysqlModule -Destination (Join-Path $backup 'mysql.alloy') }
     if (Test-Path -LiteralPath $DbctModule) { Copy-Item -LiteralPath $DbctModule -Destination (Join-Path $backup 'dbct.alloy') }
     if ($priorArgsExist) { [IO.File]::WriteAllLines((Join-Path $backup 'Arguments.txt'), $priorArgs) }
 
@@ -1025,6 +1305,13 @@ try {
             Remove-Item -LiteralPath $SqlAnywhereModule -Force -ErrorAction Stop
         }
     }
+    if ($mysqlChanged) {
+        if ($mysqlEnabled) {
+            Copy-Item -LiteralPath $mysqlSource -Destination $MysqlModule -Force
+        } else {
+            Remove-Item -LiteralPath $MysqlModule -Force -ErrorAction Stop
+        }
+    }
     if ($dbctChanged) {
         if ($dbctEnabled) {
             Copy-Item -LiteralPath $dbctSource -Destination $DbctModule -Force
@@ -1042,6 +1329,7 @@ try {
     $active = @('Windows')
     if ($hypervEnabled) { $active += 'Hyper-V' }
     if ($sqlEnabled) { $active += 'SQL Anywhere' }
+    if ($mysqlEnabled) { $active += 'MySQL' }
     if ($dbctEnabled) { $active += 'DBCT' }
     Log "Alloy ativo e pronto. Perfil: $Perfil. Modulos: $($active -join ' + ')."
     $configConfirmed = $true
@@ -1074,6 +1362,12 @@ try {
                 Copy-Item -LiteralPath $savedSql -Destination $SqlAnywhereModule -Force
             } else {
                 Remove-Item -LiteralPath $SqlAnywhereModule -Force -ErrorAction SilentlyContinue
+            }
+            $savedMysql = Join-Path $backup 'mysql.alloy'
+            if (Test-Path -LiteralPath $savedMysql) {
+                Copy-Item -LiteralPath $savedMysql -Destination $MysqlModule -Force
+            } else {
+                Remove-Item -LiteralPath $MysqlModule -Force -ErrorAction SilentlyContinue
             }
             $savedDbct = Join-Path $backup 'dbct.alloy'
             if (Test-Path -LiteralPath $savedDbct) {
