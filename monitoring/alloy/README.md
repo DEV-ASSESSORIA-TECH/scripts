@@ -162,7 +162,7 @@ política), nos módulos Antimalware (no acesso) e Advanced Threat Control.
 **Não excluir** `powershell.exe`, `bash`, `python3` nem pastas temporárias
 inteiras: isso abriria uma brecha para qualquer script. As tarefas agendadas
 dos módulos (`heartbeat.ps1`, `hypervisor-inventory.ps1`,
-`sqlanywhere-collector.ps1`) rodam com `powershell.exe -File <script>` a
+`sqlanywhere-collector.ps1`, `dbct-collector.ps1`) rodam com `powershell.exe -File <script>` a
 partir das pastas acima. Se o ATC as bloquear, prefira uma exclusão por
 **linha de comando** que contenha o caminho do script, se a versão do
 GravityZone oferecer.
@@ -189,11 +189,11 @@ Os mesmos comandos valem para `alloyctl` e para o ponto de entrada baixado
 
 | Linux | Windows | Ação |
 |-------|---------|------|
-| `install [--modules docker\|none] [--upgrade]` | `install [-Perfil servidor\|estacao] [-Modules hyperv,sqlanywhere\|none] [-Upgrade]` | credencial (se ausente) + instalação |
+| `install [--modules docker\|none] [--upgrade]` | `install [-Perfil servidor\|estacao] [-Modules hyperv,sqlanywhere,dbct\|none] [-Upgrade]` | credencial (se ausente) + instalação |
 | `credentials` | `credentials` | só o setup da credencial |
 | `check` | `check` | testa a credencial gravada, sem alterar nada |
 | `rotate` | `rotate` | troca a credencial e reinicia o Alloy |
-| `modules docker\|none` | `modules hyperv,sqlanywhere\|none` | define os módulos opcionais (os não listados são desativados) |
+| `modules docker\|none` | `modules hyperv,sqlanywhere,dbct\|none` | define os módulos opcionais (os não listados são desativados) |
 | `upgrade` | `upgrade` | atualiza o Alloy |
 | `status` | `status` | diagnóstico |
 | `uninstall [--yes]` | `uninstall [-Yes]` | remove o Alloy, mantendo credencial, configuração e o `alloyctl` |
@@ -219,9 +219,10 @@ Os mesmos comandos valem para `alloyctl` e para o ponto de entrada baixado
 | `uninstall.*` | desinstalação e limpeza completa |
 | `config.alloy` | configuração base do sistema |
 | `desktop.alloy` | configuração base do perfil estação (Windows), no lugar do `config.alloy` |
-| `docker.alloy` / `hyperv.alloy` / `sqlanywhere.alloy` | módulos opcionais |
+| `docker.alloy` / `hyperv.alloy` / `sqlanywhere.alloy` / `dbct.alloy` | módulos opcionais |
 | `hypervisor-inventory.ps1` | inventário de VMs do módulo Hyper-V (tarefa agendada) |
 | `sqlanywhere-collector.ps1` | coletor do módulo SQL Anywhere (tarefa agendada) |
+| `dbct-collector.ps1` | coletor do módulo DB Connection Tester (tarefa agendada) |
 | `heartbeat-setup.*` | configura, testa e remove o heartbeat |
 | `heartbeat.*` | heartbeat executado a cada minuto (tarefa agendada / timer systemd) |
 | `rmm/tactical-estacao.ps1` | instalação de estação pelo Tactical RMM, sem perguntas |
@@ -239,7 +240,7 @@ dashboards de servidores, que sempre fixam o job:
 | Logs | `windows-eventlog` | `windows-desktop-eventlog` (só crítico, erro e aviso) |
 | Coletores | inclui `service` | sem `service`; scrape de 60 s |
 | Credencial | `alloy-<hostname>` | compartilhada: `alloy-estacoes` |
-| Módulos opcionais e heartbeat | disponíveis | não se aplicam |
+| Módulos opcionais e heartbeat | disponíveis | só o módulo DBCT |
 | Alertas | sim | nenhum |
 
 Na primeira instalação o perfil é detectado: estação no Windows de cliente
@@ -247,9 +248,10 @@ Na primeira instalação o perfil é detectado: estação no Windows de cliente
 continuar; na automação, use `alloyctl install -Perfil estacao`. Depois,
 reaplicar e atualizar mantêm o perfil instalado. Trocar de perfil é
 `alloyctl install -Perfil <outro>`: o arquivo base do outro perfil é removido
-(com o mesmo rollback) e, ao virar estação, os módulos opcionais ativos são
-desativados. No menu, **[2] Módulos** e **[9] Heartbeat** aparecem como
-"(so servidor)" e só servem para remover o que já existia.
+(com o mesmo rollback) e, ao virar estação, os módulos Hyper-V e SQL Anywhere
+ativos são desativados (o DBCT é mantido). No menu, Hyper-V, SQL Anywhere e
+**[9] Heartbeat** aparecem como "(so servidor)" e só servem para remover o que
+já existia.
 
 A conta `alloy-estacoes` é uma só para todas as estações: uma máquina que some
 não deixa credencial órfã, e revogar a conta corta todas de uma vez.
@@ -292,9 +294,11 @@ ninguém vê.
 
 Na instalação (`-Modules auto`, padrão), os módulos já ativos são mantidos e os
 detectados são oferecidos (só em terminal interativo). `-Modules` com uma lista
-(`hyperv`, `sqlanywhere` ou `hyperv,sqlanywhere`) define o conjunto completo:
-os não listados são desativados; `none` desativa todos. No menu, **[2] Módulos
-opcionais** liga e desliga cada um sem afetar o outro.
+(`hyperv`, `sqlanywhere`, `dbct` ou combinações, como `hyperv,sqlanywhere`)
+define o conjunto completo: os não listados são desativados; `none` desativa
+todos. No menu, **[2] Módulos opcionais** liga e desliga cada um sem afetar os
+outros. O DBCT nunca é oferecido automaticamente: ative-o pelo menu ou com
+`-Modules dbct`.
 
 Cada módulo com coletor próprio grava em um subdiretório de `textfile\` e o
 Alloy lê só esse subdiretório, em job próprio.
@@ -377,6 +381,72 @@ Para usar outro protocolo ou porta, edite `links` no `config.json` (sintaxe do
 parâmetro `LINKS` do SQL Anywhere); o coletor relê o arquivo a cada execução. Desativar o módulo remove a
 tarefa, o script, a saída e os logs; a configuração fica para reativar sem
 digitar de novo.
+
+## Módulo DB Connection Tester
+
+Publica no Prometheus as falhas e lentidões de uma execução do
+[DB Connection Tester](https://github.com/DEV-ASSESSORIA-TECH/DBConnectionTester)
+(DBCT), para consultar pelo horário. Vale para servidores **e estações**.
+
+O módulo **só lê** o banco do DBCT, pela CLI pública (`dbct run status` e
+`dbct history cycles`). A execução é do próprio DBCT, que funciona sem o Alloy:
+para mantê-la rodando e voltando com o Windows, configure-a no DBCT, por exemplo
+em um terminal de administrador:
+
+```powershell
+dbct run --type tcp --host srv-db --port 1433 --interval 5 --data-dir "C:\ProgramData\DBConnectionTester" --autostart
+```
+
+(`dbct run status`, `dbct run stop`, `dbct autostart show|disable`; veja o guia da
+CLI do DBCT.) Requer um DBCT com `run status` e `history cycles`, posterior à 3.0.0.
+
+Ative em **[2] Módulos opcionais > [4] Ativar DBCT** (ou `-Modules dbct`). A
+configuração pergunta, sugerindo o que encontrar na máquina, o `dbct.exe` (MSI por
+máquina ou por usuário, PATH ou portátil) e a pasta do banco do DBCT, a que contém
+o `data.db`. Avisa se o banco não tiver execução ativa nem automática.
+**[5] Reconfigurar DBCT** (ou `install.ps1 -ReconfigureDbct`) pergunta de novo.
+
+| Parte | Onde | O que faz |
+|---|---|---|
+| Coletor | tarefa `\GrafanaLabs\Alloy DBCT Collector` (a cada 30 s), `scripts\dbct-collector.ps1`, job `integrations/dbconnectiontester` | encontra a execução ativa, processa só os ciclos novos e grava `textfile\dbct\dbct.prom` |
+
+Métricas (sem labels de host além dos que o Alloy adiciona; uma execução por banco):
+
+| Métrica | Uso |
+|---|---|
+| `dbct_stage_failures_total{stage,code}` | falhas por etapa (`dns`, `ping`, `tcp`, `database_connect`, `database_query`) e código de diagnóstico do DBCT |
+| `dbct_stage_duration_seconds` (histograma) e `dbct_stage_duration_max_seconds{stage}` | lentidão: quantis por janela e pior duração entre duas coletas |
+| `dbct_stage_checks_total{stage}`, `dbct_cycles_total` | volume de testes |
+| `dbct_stage_last_success{stage}`, `dbct_stage_last_duration_seconds{stage}` | estado do último ciclo |
+| `dbct_run_active`, `dbct_run_info{run_id,profile,target,database_type}` | execução monitorada |
+| `dbct_autostart_configured`, `dbct_autostart_running` | execução automática do DBCT no banco |
+| `dbct_collection_success`, `_duration_seconds`, `_timestamp_seconds` | saúde da coleta |
+
+Consultas para investigar um horário (Explore, intervalo em volta do horário
+informado):
+
+```promql
+sum by (stage, code) (increase(dbct_stage_failures_total{host="<host>"}[5m]))
+histogram_quantile(0.95, sum by (stage, le) (rate(dbct_stage_duration_seconds_bucket{host="<host>"}[5m])))
+max by (stage) (dbct_stage_duration_max_seconds{host="<host>"})
+```
+
+Os contadores pertencem à execução atual e voltam a zero numa execução nova
+(`increase` e `rate` tratam isso). Ao encontrar pela primeira vez uma execução
+iniciada há mais de 2 minutos, o coletor começa a partir do ciclo atual, sem
+lançar o passado no horário presente; o detalhe ciclo a ciclo continua no
+histórico do DBCT.
+
+| Pasta | Arquivos | Ciclo de vida |
+|---|---|---|
+| `scripts\` | `dbct-collector.ps1` | substituído a cada reaplicação |
+| `textfile\dbct\` | `dbct.prom` | sobrescrito a cada execução |
+| `data\dbct\` | `config.json` (`dbct.exe` e pasta do banco) | mantido ao desativar o módulo ou desinstalar; removido na limpeza completa |
+| `data\dbct\` | `state.json` (posição e contadores da coleta) | removido ao desativar o módulo |
+| `logs\` | `dbct-collector-AAAAMMDD.log` | 14 dias |
+
+Desativar o módulo ou desinstalar o Alloy não altera o DBCT: a execução
+automática, se configurada, continua.
 
 ## Heartbeat (Uptime Kuma + Loki)
 

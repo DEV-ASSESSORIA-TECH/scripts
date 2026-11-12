@@ -65,6 +65,7 @@ $service = Get-AlloyService
 $uninstaller = Find-AlloyUninstaller
 $inventoryTask = Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $InventoryTaskName -ErrorAction SilentlyContinue
 $sqlTask = Get-ScheduledTask -TaskPath $SqlTaskPath -TaskName $SqlTaskName -ErrorAction SilentlyContinue
+$dbctTasks = @(Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctCollectorTask -ErrorAction SilentlyContinue)
 $heartbeatTask = Get-HeartbeatTask
 
 if ($Purge) {
@@ -73,6 +74,7 @@ if ($Purge) {
     elseif ($service) { $targets += 'servico Alloy' }
     if ($inventoryTask) { $targets += "tarefa agendada $InventoryTaskPath$InventoryTaskName" }
     if ($sqlTask) { $targets += "tarefa agendada $SqlTaskPath$SqlTaskName" }
+    foreach ($task in $dbctTasks) { $targets += "tarefa agendada $($task.TaskPath)$($task.TaskName)" }
     if ($heartbeatTask) { $targets += "tarefa agendada $HeartbeatTaskPath$HeartbeatTaskName (heartbeat)" }
     foreach ($path in @($Base, $InstallDir, $AlloyCtlDir, $AlloyInstallerDir)) {
         if (Test-Path -LiteralPath $path) { $targets += $path }
@@ -113,6 +115,11 @@ if ($inventoryTask) {
 if ($sqlTask) {
     Write-Log 'Removendo a tarefa agendada do coletor SQL Anywhere...'
     Unregister-ScheduledTask -TaskPath $SqlTaskPath -TaskName $SqlTaskName -Confirm:$false
+}
+# DBCT: so o coletor sai; a execucao continua e do DBCT e nao e alterada.
+foreach ($task in $dbctTasks) {
+    Write-Log 'Removendo a tarefa agendada do coletor DBCT...'
+    Unregister-ScheduledTask -TaskPath $task.TaskPath -TaskName $task.TaskName -Confirm:$false
 }
 
 # Heartbeat: a tarefa sai junto com o Alloy (desinstalacao intencional); a
