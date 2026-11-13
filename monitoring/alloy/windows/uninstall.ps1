@@ -67,6 +67,9 @@ $inventoryTask = Get-ScheduledTask -TaskPath $InventoryTaskPath -TaskName $Inven
 $sqlTask = Get-ScheduledTask -TaskPath $SqlTaskPath -TaskName $SqlTaskName -ErrorAction SilentlyContinue
 $dbctTasks = @(Get-ScheduledTask -TaskPath $DbctTaskPath -TaskName $DbctCollectorTask -ErrorAction SilentlyContinue)
 $heartbeatTask = Get-HeartbeatTask
+# Grupo local dos produtores de backup (criado pelo install.ps1): so sai no -Purge.
+$backupGroup = $false
+try { $backupGroup = [ADSI]::Exists("WinNT://$env:COMPUTERNAME/$BackupWritersGroup,group") } catch { }
 
 if ($Purge) {
     $targets = @()
@@ -80,6 +83,7 @@ if ($Purge) {
         if (Test-Path -LiteralPath $path) { $targets += $path }
     }
     if (Test-Path -LiteralPath $Registry) { $targets += $Registry }
+    if ($backupGroup) { $targets += "grupo local '$BackupWritersGroup' (escrita dos backups)" }
     if ($targets.Count -eq 0) {
         Write-Log 'Nada a remover: o Alloy nao esta instalado e nao ha residuos.'
         return
@@ -183,6 +187,13 @@ if ($Purge) {
     Remove-IfEmpty (Split-Path -Parent $Base)
     Remove-IfEmpty (Split-Path -Parent $InstallDir)
     Remove-IfEmpty 'HKLM:\SOFTWARE\GrafanaLabs'
+    if ($backupGroup) {
+        try {
+            ([ADSI]"WinNT://$env:COMPUTERNAME,computer").Delete('group', $BackupWritersGroup)
+        } catch {
+            Write-Warn "Nao foi possivel remover o grupo local '$BackupWritersGroup': $($_.Exception.Message)"
+        }
+    }
     Write-Ok "Limpeza completa concluida em $hostName."
     Write-Host ''
     if (-not $account) { $account = "alloy-$hostName" }
@@ -192,6 +203,7 @@ if ($Purge) {
 } else {
     Write-Ok "Alloy desinstalado de $hostName."
     Write-Log "Mantidos: $Secret, $ConfigDir, $DataDir e $BackupDir."
+    if (Test-Path -LiteralPath $BackupTextfileDir) { Write-Log "Mantidos tambem os arquivos dos produtores de backup em $BackupTextfileDir." }
     if ($heartbeatTask) {
         Write-Warn 'Heartbeat parado: pause o monitor Push deste host no Uptime Kuma. A URL ficou gravada para reativar em [9].'
     }

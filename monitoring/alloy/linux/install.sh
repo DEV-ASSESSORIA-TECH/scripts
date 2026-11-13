@@ -41,6 +41,10 @@ command -v python3 >/dev/null || fail 'python3 ausente; instale antes de executa
 command -v cmp >/dev/null || fail 'cmp ausente; instale coreutils/diffutils.'
 
 script_dir=$(cd -- "$(dirname -- "$0")" && pwd)
+# Mesmos valores de lib/common.sh (install.sh roda sem a lib).
+TEXTFILE_DIR=/var/lib/alloy-textfile
+BACKUP_TEXTFILE_DIR=$TEXTFILE_DIR/backup
+BACKUP_GROUP=alloy-backup
 [[ -s "$script_dir/config.alloy" ]] || fail 'config.alloy ausente ao lado de install.sh.'
 
 docker_ready() {
@@ -73,6 +77,17 @@ esac
 stage=$(mktemp -d)
 trap 'rm -rf -- "$stage"' EXIT
 cp -- "$script_dir/config.alloy" "$stage/config.alloy"
+# Leitura dos backups: sempre instalada (pasta vazia nao publica nada).
+if [[ -s "$script_dir/backup.alloy" ]]; then
+  cp -- "$script_dir/backup.alloy" "$stage/backup.alloy"
+else
+  ref=${ALLOY_REF:-main}
+  [[ $ref =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ && $ref != *..* ]] || fail "ALLOY_REF invalido: $ref"
+  log "Baixando backup.alloy (ref $ref)..."
+  curl -fsSL --proto '=https' -o "$stage/backup.alloy" \
+    "https://raw.githubusercontent.com/DEV-ASSESSORIA-TECH/scripts/$ref/monitoring/alloy/linux/backup.alloy"
+  [[ -s "$stage/backup.alloy" ]] || fail 'Download backup.alloy vazio.'
+fi
 if [[ $use_docker == true ]]; then
   if [[ -s "$script_dir/docker.alloy" ]]; then
     cp -- "$script_dir/docker.alloy" "$stage/docker.alloy"
@@ -91,7 +106,7 @@ fi
 shopt -s nullglob
 for existing in /etc/alloy/*.alloy; do
   name=$(basename -- "$existing")
-  [[ $name == config.alloy || $name == docker.alloy ]] || cp -- "$existing" "$stage/$name"
+  [[ $name == config.alloy || $name == docker.alloy || $name == backup.alloy ]] || cp -- "$existing" "$stage/$name"
 done
 shopt -u nullglob
 
@@ -156,6 +171,13 @@ install -d -o root -g alloy -m 0750 /etc/alloy
 chown root:alloy /etc/alloy/oauth-client-secret
 chmod 0640 /etc/alloy/oauth-client-secret
 usermod -aG adm,systemd-journal alloy
+# Pasta dos backups (contrato backup.yml do repositorio grafana): produtores
+# externos gravam <service>__<backup_id>.prom. Escrita para root e para o grupo
+# alloy-backup (a conta do produtor entra nele); setgid mantem o grupo nos
+# arquivos novos. Leitura para todos: o Alloy roda como alloy ou root.
+getent group "$BACKUP_GROUP" >/dev/null || groupadd --system "$BACKUP_GROUP"
+install -d -o root -g root -m 0755 "$TEXTFILE_DIR"
+install -d -o root -g "$BACKUP_GROUP" -m 2775 "$BACKUP_TEXTFILE_DIR"
 # Docker requer acesso aos cgroups protegidos por agentes de seguranca.
 # O servico executa como root SOMENTE quando o modulo Docker estiver ativo.
 # Nao adicionamos alloy ao grupo docker: o servico root nao precisa disso.
@@ -193,7 +215,7 @@ same_file() {
   [[ -f "$2" ]] && cmp -s -- "$1" "$2"
 }
 files_changed=false
-for name in config.alloy docker.alloy; do
+for name in config.alloy docker.alloy backup.alloy; do
   if [[ -f "$stage/$name" ]]; then
     same_file "$stage/$name" "/etc/alloy/$name" || files_changed=true
   elif [[ -e "/etc/alloy/$name" || -L "/etc/alloy/$name" ]]; then
@@ -217,7 +239,7 @@ if [[ $files_changed == false && $env_changed == false &&
       $dropin_changed == false && $identity_changed == false &&
       $alloy_changed == false && $old_active == active && $old_enabled == enabled ]]; then
   log 'Nenhuma alteracao encontrada. Alloy ja esta ativo; nenhuma reinicializacao necessaria.'
-  log "Versao: $(dpkg-query -W -f='${Version}' alloy). Modulos: Linux$( [[ $use_docker == true ]] && printf ' + Docker' || true )."
+  log "Versao: $(dpkg-query -W -f='${Version}' alloy). Modulos: Linux$( [[ $use_docker == true ]] && printf ' + Docker' || true ) + leitura de backups."
   exit 0
 fi
 
@@ -225,7 +247,7 @@ log 'Aplicando apenas as alteracoes necessarias...'
 stamp="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 backup=$(mktemp -d)
 trap 'rm -rf -- "$stage" "$backup"' EXIT
-for name in config.alloy docker.alloy; do
+for name in config.alloy docker.alloy backup.alloy; do
   [[ ! -f "/etc/alloy/$name" ]] || cp -a -- "/etc/alloy/$name" "$backup/$name"
 done
 [[ ! -f "$env_file" ]] || cp -a -- "$env_file" "$backup/default.alloy"
@@ -233,7 +255,7 @@ done
 
 rollback() {
   log 'Restaurando configuracao anterior...'
-  for name in config.alloy docker.alloy; do
+  for name in config.alloy docker.alloy backup.alloy; do
     if [[ -f "$backup/$name" ]]; then
       cp -a -- "$backup/$name" "/etc/alloy/$name"
     else
@@ -276,7 +298,7 @@ rollback() {
 }
 
 if [[ $files_changed == true ]]; then
-  for name in config.alloy docker.alloy; do
+  for name in config.alloy docker.alloy backup.alloy; do
     if [[ -f "$stage/$name" ]]; then
       if ! same_file "$stage/$name" "/etc/alloy/$name"; then
         install -o root -g alloy -m 0640 "$stage/$name" "/etc/alloy/.$name.tmp"
@@ -323,12 +345,12 @@ fi
 
 # Backups persistentes apenas quando houve alteracoes; nenhum backup vazio.
 install -d -m 0700 /etc/alloy/backups
-for name in config.alloy docker.alloy; do
+for name in config.alloy docker.alloy backup.alloy; do
   [[ ! -f "$backup/$name" ]] || cp -a -- "$backup/$name" "/etc/alloy/backups/$name.$stamp"
 done
 [[ ! -f "$backup/default.alloy" ]] || cp -a -- "$backup/default.alloy" "/etc/alloy/backups/default.alloy.$stamp"
 [[ ! -f "$backup/execution.conf" ]] || cp -a -- "$backup/execution.conf" "/etc/alloy/backups/execution.conf.$stamp"
 
 log "Alloy ativo e pronto como $desired_user:$desired_group."
-log "Modulos: Linux$( [[ $use_docker == true ]] && printf ' + Docker' || true )"
+log "Modulos: Linux$( [[ $use_docker == true ]] && printf ' + Docker' || true ) + leitura de backups ($BACKUP_TEXTFILE_DIR)"
 systemctl --no-pager --full status alloy

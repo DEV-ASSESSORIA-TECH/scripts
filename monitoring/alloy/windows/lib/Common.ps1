@@ -22,6 +22,10 @@ $HyperVFile  = Join-Path $ConfigDir 'hyperv.alloy'
 $SqlAnywhereFile = Join-Path $ConfigDir 'sqlanywhere.alloy'
 $MysqlFile   = Join-Path $ConfigDir 'mysql.alloy'
 $DbctFile    = Join-Path $ConfigDir 'dbct.alloy'
+# Leitura dos backups: sempre instalada no perfil servidor (ver install.ps1).
+$BackupFile         = Join-Path $ConfigDir 'backup.alloy'
+$BackupTextfileDir  = Join-Path $Base 'textfile\backup'
+$BackupWritersGroup = 'Alloy Backup Writers'
 # Arquivo base de cada perfil (ver install.ps1 -Perfil).
 $ServerFile  = Join-Path $ConfigDir 'config.alloy'
 $DesktopFile = Join-Path $ConfigDir 'desktop.alloy'

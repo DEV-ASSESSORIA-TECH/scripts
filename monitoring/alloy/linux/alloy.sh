@@ -295,14 +295,14 @@ run_credentials() {
 }
 
 run_installer() {
-  fetch "$src" install.sh config.alloy || return 1
+  fetch "$src" install.sh config.alloy backup.alloy || return 1
   bash "$src/install.sh" "$@"
 }
 
 do_install() {
   if ! credential_present; then
     # Uma unica chamada de download para as duas etapas.
-    fetch "$src" setup-credentials.py install.sh config.alloy || return 1
+    fetch "$src" setup-credentials.py install.sh config.alloy backup.alloy || return 1
     ui_section 'ETAPA 1/2 - CREDENCIAL'
     run_credentials || return 1
     ui_section 'ETAPA 2/2 - INSTALACAO'
