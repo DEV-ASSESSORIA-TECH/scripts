@@ -46,6 +46,7 @@ function Test-HyperVModule { Test-Path -LiteralPath $HyperVFile -PathType Leaf }
 function Test-SqlAnywhereModule { Test-Path -LiteralPath $SqlAnywhereFile -PathType Leaf }
 function Test-MysqlModule { Test-Path -LiteralPath $MysqlFile -PathType Leaf }
 function Test-DbctModule { Test-Path -LiteralPath $DbctFile -PathType Leaf }
+function Test-BackupReader { Test-Path -LiteralPath $BackupFile -PathType Leaf }
 function Test-HeartbeatConfigured {
     (Test-Path -LiteralPath $HeartbeatUrlFile -PathType Leaf) -or ($null -ne (Get-HeartbeatTask))
 }
@@ -319,6 +320,36 @@ function Show-InventoryDiagnostics {
     Write-UiRow 'Logs' 'none' "$LogDir (retencao 14 dias)"
 }
 
+# Leitura dos backups: os .prom sao de produtores externos (contrato backup.yml).
+function Show-BackupDiagnostics {
+    Write-UiSection 'BACKUPS'
+    if (-not (Test-BackupReader)) {
+        Write-UiRow 'Leitura' 'warn' 'backup.alloy ausente: use [1] Reaplicar configuracao'
+        return
+    }
+    if (-not (Test-Path -LiteralPath $BackupTextfileDir -PathType Container)) {
+        Write-UiRow 'Pasta' 'err' 'textfile\backup ausente: use [1] Reaplicar configuracao'
+        return
+    }
+    $files = @(Get-ChildItem -LiteralPath $BackupTextfileDir -Filter '*.prom' -File -ErrorAction SilentlyContinue)
+    if ($files.Count -eq 0) {
+        Write-UiRow 'Arquivos' 'none' 'nenhum (nenhum backup reportado neste host)'
+    } else {
+        $names = ($files | ForEach-Object { $_.BaseName }) -join ' '
+        if ($names.Length -gt $UiWidth - 6) { $names = $names.Substring(0, $UiWidth - 9) + '...' }
+        Write-UiRow 'Arquivos' 'ok' "$($files.Count): $names"
+    }
+    try {
+        if (-not [ADSI]::Exists("WinNT://$env:COMPUTERNAME/$BackupWritersGroup,group")) { throw 'ausente' }
+        $group = [ADSI]"WinNT://$env:COMPUTERNAME/$BackupWritersGroup,group"
+        $members = @($group.Invoke('Members') | ForEach-Object { $_.GetType().InvokeMember('Name', 'GetProperty', $null, $_, $null) }) -join ', '
+        if (-not $members) { $members = 'sem membros' }
+        Write-UiRow 'Escrita' 'none' "grupo '$BackupWritersGroup': $members (alem de SYSTEM e Administradores)"
+    } catch {
+        Write-UiRow 'Escrita' 'warn' "grupo '$BackupWritersGroup' ausente: so SYSTEM e Administradores gravam"
+    }
+}
+
 # Tarefa do coletor, configuracao e ultima saida do modulo DBCT. A execucao
 # continua e do DBCT: o estado vem das metricas que o coletor publica.
 function Show-DbctDiagnostics {
@@ -533,6 +564,7 @@ function Show-AlloyDiagnostics {
     if (Test-SqlAnywhereModule) { Show-SqlAnywhereDiagnostics }
     if (Test-MysqlModule) { Show-MysqlDiagnostics }
     if (Test-DbctModule) { Show-DbctDiagnostics }
+    if ((Get-AlloyPerfil) -eq 'servidor' -and (Test-PerfilInstalado)) { Show-BackupDiagnostics }
     if (Test-HeartbeatConfigured) { Show-HeartbeatDiagnostics }
 
     Write-UiSection 'CONECTIVIDADE'
@@ -559,6 +591,9 @@ function Show-AlloyDiagnostics {
     if (Test-DbctModule) {
         Write-Query 'DBCT' $GrafanaDsMetrics "dbct_collection_success{job=`"integrations/dbconnectiontester`",host=`"$hostName`"}"
         Write-Query 'DBCT falhas' $GrafanaDsMetrics "sum by (stage, code) (increase(dbct_stage_failures_total{host=`"$hostName`"}[5m]))"
+    }
+    if (Test-BackupReader) {
+        Write-Query 'Backups' $GrafanaDsMetrics "{job=`"integrations/backup`",host=`"$hostName`",__name__=~`"backup_last_attempt_success|backup_collection_success`"}"
     }
     if (Test-HeartbeatConfigured) {
         Write-Query 'Heartbeat' $GrafanaDsLogs "{job=`"alloy-heartbeat`",host=`"$hostName`"} | logfmt"

@@ -16,6 +16,9 @@
 #   estacao (desktop.alloy, job integrations/windows-desktop: maquina
 #   descartavel, sem alertas e sem modulos opcionais). auto (padrao) mantem o
 #   instalado; na primeira instalacao, estacao se o Windows for de cliente.
+# Leitura dos backups (backup.alloy): sempre instalada no perfil servidor, sem
+#   modulo opcional. Cria textfile\backup e o grupo local "Alloy Backup
+#   Writers" (escrita); os .prom sao gravados por produtores externos.
 [CmdletBinding()]
 param(
     [switch]$Upgrade,
@@ -99,6 +102,12 @@ $DbctOutputDir = Join-Path $TextfileDir 'dbct'
 $DbctOutput = Join-Path $DbctOutputDir 'dbct.prom'
 $DbctTaskPath = '\GrafanaLabs\'
 $DbctCollectorTask = 'Alloy DBCT Collector'
+# Leitura dos backups (perfil servidor, sempre instalada): produtores externos
+# gravam textfile\backup\<service>__<backup_id>.prom (contrato backup.yml do
+# repositorio grafana). Escrita para SYSTEM, Administradores e o grupo local.
+$BackupTextfileDir = Join-Path $TextfileDir 'backup'
+$BackupWritersGroup = 'Alloy Backup Writers'
+$BackupWritersDescription = 'Gravam o estado dos backups lido pelo Grafana Alloy'
 
 function Log([string]$Text) { Write-Host "[Alloy] $Text" }
 function Ensure-Directory([string]$Path) {
@@ -270,18 +279,52 @@ function Install-AlloyPackage {
     # A pasta fica (para a exclusao do antivirus); o conteudo sai.
     Get-ChildItem -LiteralPath $InstallerDir -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
-function Set-PrivateDirectoryAcl([string]$Path) {
+# SYSTEM e Administradores com controle total; -Writers recebe Modify (gravar,
+# substituir e apagar arquivos, sem alterar permissoes).
+function Set-PrivateDirectoryAcl([string]$Path, [System.Security.Principal.SecurityIdentifier[]]$Writers = @()) {
     $acl = [System.Security.AccessControl.DirectorySecurity]::new()
     $acl.SetAccessRuleProtection($true, $false)
     $admin = [System.Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $acl.SetOwner($admin)
+    $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
     foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
         $id = [System.Security.Principal.SecurityIdentifier]::new($sid)
-        $inherit = [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit
         $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($id, [System.Security.AccessControl.FileSystemRights]::FullControl, $inherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)
         $acl.AddAccessRule($rule)
     }
+    foreach ($id in @($Writers)) {
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($id, [System.Security.AccessControl.FileSystemRights]::Modify, $inherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)
+        $acl.AddAccessRule($rule)
+    }
     Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
+# Grupo local dos produtores de backup: SID do grupo, criado se ausente (ADSI
+# WinNT: funciona no Windows PowerShell 5.1 de qualquer versao do Windows).
+function Get-BackupWritersSid {
+    $account = [System.Security.Principal.NTAccount]::new($env:COMPUTERNAME, $BackupWritersGroup)
+    try { return $account.Translate([System.Security.Principal.SecurityIdentifier]) } catch { }
+    Log "Criando o grupo local '$BackupWritersGroup'..."
+    $computer = [ADSI]"WinNT://$env:COMPUTERNAME,computer"
+    $group = $computer.Create('group', $BackupWritersGroup)
+    $group.SetInfo()
+    $group.Put('Description', $BackupWritersDescription)
+    $group.SetInfo()
+    return $account.Translate([System.Security.Principal.SecurityIdentifier])
+}
+
+# Pasta lida pelo backup.alloy. Sem o grupo (ex.: controlador de dominio, sem
+# grupos locais), a pasta fica so com SYSTEM e Administradores e a leitura
+# continua valendo; o aviso indica o motivo.
+function Sync-BackupTextfile {
+    Ensure-Directory $BackupTextfileDir
+    $writers = @()
+    try {
+        $writers = @(Get-BackupWritersSid)
+    } catch {
+        Write-Warning "Grupo local '$BackupWritersGroup' indisponivel ($($_.Exception.Message)). $BackupTextfileDir aceita escrita so de SYSTEM e Administradores."
+    }
+    Set-PrivateDirectoryAcl $BackupTextfileDir $writers
 }
 
 # Arquivo do modulo: do clone local, ou baixado do mesmo ref do alloy.ps1
@@ -936,6 +979,7 @@ $HyperVModule = Join-Path $ConfigDir 'hyperv.alloy'
 $SqlAnywhereModule = Join-Path $ConfigDir 'sqlanywhere.alloy'
 $DbctModule = Join-Path $ConfigDir 'dbct.alloy'
 $MysqlModule = Join-Path $ConfigDir 'mysql.alloy'
+$BackupModule = Join-Path $ConfigDir 'backup.alloy'
 $Modules = @($Modules | Select-Object -Unique)
 if ($Modules.Count -gt 1 -and (($Modules -contains 'auto') -or ($Modules -contains 'none'))) {
     throw '-Modules: auto e none nao podem ser combinados com outros valores.'
@@ -1087,6 +1131,10 @@ if ($dbctEnabled) {
     throw '-ReconfigureDbct requer o modulo DBCT ativo.'
 }
 
+# Leitura dos backups: parte do perfil servidor, sem pergunta nem -Modules.
+# Pasta vazia nao publica nada; estacoes nao reportam backups.
+$backupEnabled = $Perfil -eq 'servidor'
+
 $Source = Join-Path $PSScriptRoot $BaseName
 if (-not (Test-Path -LiteralPath $Secret -PathType Leaf) -or (Get-Item -LiteralPath $Secret).Length -eq 0) {
     throw 'Credencial ausente. Execute alloy.ps1 (ou setup-credentials.ps1) primeiro.'
@@ -1139,9 +1187,12 @@ try {
         Copy-ModuleFile $DbctCollectorName $stageDbctCollector
         Assert-ScriptSyntax $stageDbctCollector
     }
+    if ($backupEnabled) {
+        Copy-ModuleFile 'backup.alloy' (Join-Path $stage 'backup.alloy')
+    }
     if (Test-Path -LiteralPath $ConfigDir -PathType Container) {
         Get-ChildItem -LiteralPath $ConfigDir -Filter '*.alloy' -File | ForEach-Object {
-            if ($_.Name -notin @('config.alloy', 'desktop.alloy', 'hyperv.alloy', 'sqlanywhere.alloy', 'mysql.alloy', 'dbct.alloy')) {
+            if ($_.Name -notin @('config.alloy', 'desktop.alloy', 'hyperv.alloy', 'sqlanywhere.alloy', 'mysql.alloy', 'dbct.alloy', 'backup.alloy')) {
                 Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $stage $_.Name)
             }
         }
@@ -1171,7 +1222,7 @@ try {
     Log 'Validando a configuracao completa antes de alterar o servico...'
     & $Exe validate $stage
     if ($LASTEXITCODE -ne 0) {
-        $hint = if ($hypervEnabled -or $sqlEnabled -or $mysqlEnabled -or $dbctEnabled) { ' Os modulos Hyper-V, SQL Anywhere, MySQL e DBCT requerem Alloy v1.11+ (use Atualizar Alloy).' } else { '' }
+        $hint = if ($hypervEnabled -or $sqlEnabled -or $mysqlEnabled -or $dbctEnabled -or $backupEnabled) { ' A leitura de backups e os modulos Hyper-V, SQL Anywhere, MySQL e DBCT requerem Alloy v1.11+ (use Atualizar Alloy).' } else { '' }
         throw "Configuracao invalida. Instalacao ativa preservada.$hint"
     }
 
@@ -1185,12 +1236,18 @@ try {
     Set-PrivateDirectoryAcl $BackupDir
     if ($hypervEnabled -or $sqlEnabled -or $dbctEnabled) {
         # scripts\ guarda codigo executado como SYSTEM: so SYSTEM e Administradores.
-        # Os subdiretorios de textfile\ herdam a ACL.
-        foreach ($dir in @($ScriptsDir, $TextfileDir, $LogDir)) {
+        foreach ($dir in @($ScriptsDir, $LogDir)) {
             Ensure-Directory $dir
             Set-PrivateDirectoryAcl $dir
         }
     }
+    if ($hypervEnabled -or $sqlEnabled -or $dbctEnabled -or $backupEnabled) {
+        # Os subdiretorios de textfile\ herdam a ACL, exceto textfile\backup
+        # (ACL propria, com o grupo dos produtores).
+        Ensure-Directory $TextfileDir
+        Set-PrivateDirectoryAcl $TextfileDir
+    }
+    if ($backupEnabled) { Sync-BackupTextfile }
     if ($hypervEnabled) {
         Ensure-Directory $InventoryOutputDir
         Ensure-Directory $InventoryState
@@ -1257,8 +1314,14 @@ try {
     } else {
         Test-Path -LiteralPath $DbctModule
     }
+    $backupSource = Join-Path $stage 'backup.alloy'
+    $backupChanged = if ($backupEnabled) {
+        -not (Same-File $backupSource $BackupModule)
+    } else {
+        Test-Path -LiteralPath $BackupModule
+    }
     $argsChanged = ($priorArgs -join [char]10) -cne ($argsNew -join [char]10)
-    $mustApply = $configChanged -or $moduleChanged -or $sqlChanged -or $mysqlChanged -or $dbctChanged -or $argsChanged -or $Upgrade -or -not $priorRunning -or -not $priorAuto
+    $mustApply = $configChanged -or $moduleChanged -or $sqlChanged -or $mysqlChanged -or $dbctChanged -or $backupChanged -or $argsChanged -or $Upgrade -or -not $priorRunning -or -not $priorAuto
     if (-not $mustApply) {
         Log 'Nenhuma alteracao na configuracao; servico mantido em execucao.'
         Sync-ModuleTasks
@@ -1274,6 +1337,7 @@ try {
     if (Test-Path -LiteralPath $SqlAnywhereModule) { Copy-Item -LiteralPath $SqlAnywhereModule -Destination (Join-Path $backup 'sqlanywhere.alloy') }
     if (Test-Path -LiteralPath $MysqlModule) { Copy-Item -LiteralPath $MysqlModule -Destination (Join-Path $backup 'mysql.alloy') }
     if (Test-Path -LiteralPath $DbctModule) { Copy-Item -LiteralPath $DbctModule -Destination (Join-Path $backup 'dbct.alloy') }
+    if (Test-Path -LiteralPath $BackupModule) { Copy-Item -LiteralPath $BackupModule -Destination (Join-Path $backup 'backup.alloy') }
     if ($priorArgsExist) { [IO.File]::WriteAllLines((Join-Path $backup 'Arguments.txt'), $priorArgs) }
 
     foreach ($name in @('application','system')) {
@@ -1319,6 +1383,13 @@ try {
             Remove-Item -LiteralPath $DbctModule -Force -ErrorAction Stop
         }
     }
+    if ($backupChanged) {
+        if ($backupEnabled) {
+            Copy-Item -LiteralPath $backupSource -Destination $BackupModule -Force
+        } else {
+            Remove-Item -LiteralPath $BackupModule -Force -ErrorAction Stop
+        }
+    }
     New-ItemProperty -LiteralPath $Registry -Name 'Arguments' -PropertyType MultiString -Value ([string[]]$argsNew) -Force | Out-Null
     Set-Service -Name $Service -StartupType Automatic
     $startedAt = Get-Date
@@ -1331,6 +1402,7 @@ try {
     if ($sqlEnabled) { $active += 'SQL Anywhere' }
     if ($mysqlEnabled) { $active += 'MySQL' }
     if ($dbctEnabled) { $active += 'DBCT' }
+    if ($backupEnabled) { $active += 'leitura de backups' }
     Log "Alloy ativo e pronto. Perfil: $Perfil. Modulos: $($active -join ' + ')."
     $configConfirmed = $true
     # Configuracao confirmada: uma falha das tarefas dos modulos daqui em
@@ -1374,6 +1446,12 @@ try {
                 Copy-Item -LiteralPath $savedDbct -Destination $DbctModule -Force
             } else {
                 Remove-Item -LiteralPath $DbctModule -Force -ErrorAction SilentlyContinue
+            }
+            $savedBackup = Join-Path $backup 'backup.alloy'
+            if (Test-Path -LiteralPath $savedBackup) {
+                Copy-Item -LiteralPath $savedBackup -Destination $BackupModule -Force
+            } else {
+                Remove-Item -LiteralPath $BackupModule -Force -ErrorAction SilentlyContinue
             }
             if ($priorArgsExist) {
                 New-ItemProperty -LiteralPath $Registry -Name 'Arguments' -PropertyType MultiString -Value ([string[]]$priorArgs) -Force | Out-Null

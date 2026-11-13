@@ -100,6 +100,31 @@ alloyctl_row() {
   esac
 }
 
+# Leitura dos backups: sempre instalada; os arquivos sao de produtores externos.
+diagnose_backup() {
+  local files names members
+  ui_section BACKUPS
+  if [[ ! -f $ETC_DIR/backup.alloy ]]; then
+    ui_row Leitura warn 'backup.alloy ausente; aplique com [1] Reaplicar'
+    return
+  fi
+  if [[ ! -d $BACKUP_TEXTFILE_DIR ]]; then
+    ui_row Pasta err "$BACKUP_TEXTFILE_DIR ausente; aplique com [1] Reaplicar"
+    return
+  fi
+  shopt -s nullglob
+  files=("$BACKUP_TEXTFILE_DIR"/*.prom)
+  shopt -u nullglob
+  if ((${#files[@]} == 0)); then
+    ui_row Arquivos none 'nenhum (nenhum backup reportado neste host)'
+  else
+    names=$(for f in "${files[@]}"; do basename -- "$f" .prom; done | paste -sd ' ')
+    ui_row Arquivos ok "${#files[@]}: ${names:0:$((UI_WIDTH - 6))}"
+  fi
+  members=$(getent group "$BACKUP_GROUP" | cut -d: -f4)
+  ui_row Escrita none "grupo $BACKUP_GROUP: ${members:-sem membros} (alem de root)"
+}
+
 # LAST_STATUS/LAST_ACTION sao definidos pelo menu do alloy.sh.
 print_header() {
   local status badge text cred_badge cred_text mods heartbeat
@@ -219,6 +244,7 @@ diagnose() {
     fi
   fi
 
+  diagnose_backup
   if heartbeat_configured; then diagnose_heartbeat; fi
 
   ui_section CONECTIVIDADE
@@ -232,6 +258,7 @@ diagnose() {
     print_query Docker "$GRAFANA_DS_METRICS" "up{job=\"integrations/docker\",host=\"$host\"}"
     print_query 'Logs Docker' "$GRAFANA_DS_LOGS" "{job=\"docker\",host=\"$host\"}"
   fi
+  print_query Backups "$GRAFANA_DS_METRICS" "{job=\"integrations/backup\",host=\"$host\",__name__=~\"backup_last_attempt_success|backup_collection_success\"}"
   if heartbeat_configured; then
     print_query Heartbeat "$GRAFANA_DS_LOGS" "{job=\"alloy-heartbeat\",host=\"$(cat /proc/sys/kernel/hostname 2>/dev/null || hostname)\"} | logfmt"
   fi

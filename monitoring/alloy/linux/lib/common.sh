@@ -15,6 +15,11 @@ ENV_FILE=/etc/default/alloy
 DROPIN_DIR=/etc/systemd/system/alloy.service.d
 DROPIN_FILE=$DROPIN_DIR/zz-assessoriatech-execution.conf
 DATA_DIR=/var/lib/alloy
+# Leitura dos backups (backup.alloy): pasta e grupo com escrita (mesmos valores
+# do install.sh).
+TEXTFILE_DIR=/var/lib/alloy-textfile
+BACKUP_TEXTFILE_DIR=$TEXTFILE_DIR/backup
+BACKUP_GROUP=alloy-backup
 APT_SOURCE=/etc/apt/sources.list.d/grafana.list
 APT_KEY=/etc/apt/keyrings/grafana.asc
 READY_URL=http://127.0.0.1:12345/-/ready

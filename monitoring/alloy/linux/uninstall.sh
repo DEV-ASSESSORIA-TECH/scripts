@@ -51,11 +51,12 @@ grafana_repo_user() {
 if [[ $purge == true ]]; then
   targets=()
   [[ $package_known == true ]] && targets+=("pacote alloy (purge)")
-  for path in "$ETC_DIR" "$DATA_DIR" "$ENV_FILE" "$DROPIN_FILE" "$HEARTBEAT_TIMER_FILE" "$HEARTBEAT_LIB" \
+  for path in "$ETC_DIR" "$DATA_DIR" "$TEXTFILE_DIR" "$ENV_FILE" "$DROPIN_FILE" "$HEARTBEAT_TIMER_FILE" "$HEARTBEAT_LIB" \
               "$ALLOYCTL_BIN" "$ALLOYCTL_DIR"; do
     [[ -e $path || -L $path ]] && targets+=("$path")
   done
   id alloy >/dev/null 2>&1 && targets+=("usuario/grupo alloy")
+  getent group "$BACKUP_GROUP" >/dev/null 2>&1 && targets+=("grupo $BACKUP_GROUP (escrita dos backups)")
   repo_user=$(grafana_repo_user)
   if [[ -z $repo_user ]]; then
     [[ -e $APT_SOURCE ]] && targets+=("$APT_SOURCE")
@@ -123,7 +124,7 @@ systemctl reset-failed alloy.service >/dev/null 2>&1 || true
 
 if [[ $purge == true ]]; then
   log 'Removendo credencial, configuracao, backups e dados...'
-  rm -rf -- "$ETC_DIR" "$DATA_DIR"
+  rm -rf -- "$ETC_DIR" "$DATA_DIR" "$TEXTFILE_DIR"
   rm -f -- "$ENV_FILE"
   # O bash le o script em execucao pelo descritor ja aberto: remover o
   # diretorio do alloyctl agora e seguro.
@@ -134,6 +135,9 @@ if [[ $purge == true ]]; then
   fi
   if getent group alloy >/dev/null 2>&1; then
     groupdel alloy 2>/dev/null || warn 'Nao foi possivel remover o grupo alloy.'
+  fi
+  if getent group "$BACKUP_GROUP" >/dev/null 2>&1; then
+    groupdel "$BACKUP_GROUP" 2>/dev/null || warn "Nao foi possivel remover o grupo $BACKUP_GROUP."
   fi
   if [[ -z $repo_user ]]; then
     rm -f -- "$APT_SOURCE" "$APT_KEY"
@@ -147,6 +151,7 @@ if [[ $purge == true ]]; then
 else
   ok "Alloy desinstalado de $host."
   log "Mantidos: $SECRET, $ETC_DIR/*.alloy e $ETC_DIR/backups."
+  [[ -d $BACKUP_TEXTFILE_DIR ]] && log "Mantidos tambem os arquivos dos produtores de backup em $BACKUP_TEXTFILE_DIR."
   log 'Para reinstalar sem novo setup, execute a instalacao novamente.'
   if [[ $heartbeat_was_on == true ]]; then
     warn 'Heartbeat parado: pause o monitor Push deste host no Uptime Kuma. A URL ficou gravada para reativar em [9].'

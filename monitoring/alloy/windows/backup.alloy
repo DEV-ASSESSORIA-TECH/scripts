@@ -1,0 +1,38 @@
+// Leitura dos backups (perfil servidor; sempre instalada, sem modulo opcional).
+// Nao ha coletor do Alloy: cada software de backup, ou um observador dele,
+// grava textfile\backup\<service>__<backup_id>.prom conforme o contrato
+// contracts/prometheus/backup.yml (repositorio grafana). Pasta vazia nao
+// publica nenhuma serie backup_*. A pasta aceita escrita do grupo local
+// "Alloy Backup Writers" (criado pelo install.ps1). Requer Alloy v1.11+
+// (bloco textfile). O config.alloy fornece prometheus.remote_write.central.
+
+prometheus.exporter.windows "backup" {
+  enabled_collectors = ["textfile"]
+
+  textfile {
+    directories = ["C:\\ProgramData\\GrafanaLabs\\Alloy\\textfile\\backup"]
+  }
+}
+
+discovery.relabel "backup" {
+  targets = prometheus.exporter.windows.backup.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "integrations/backup"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = string.to_lower(constants.hostname)
+  }
+  rule {
+    target_label = "host"
+    replacement  = string.to_lower(constants.hostname)
+  }
+}
+
+prometheus.scrape "backup" {
+  targets         = discovery.relabel.backup.output
+  scrape_interval = "60s"
+  forward_to      = [prometheus.remote_write.central.receiver]
+}
