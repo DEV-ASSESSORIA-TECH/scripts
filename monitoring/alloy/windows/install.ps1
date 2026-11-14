@@ -292,7 +292,7 @@ function Set-PrivateDirectoryAcl([string]$Path, [System.Security.Principal.Secur
         $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($id, [System.Security.AccessControl.FileSystemRights]::FullControl, $inherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)
         $acl.AddAccessRule($rule)
     }
-    foreach ($id in @($Writers)) {
+    foreach ($id in @($Writers | Where-Object { $null -ne $_ })) {
         $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($id, [System.Security.AccessControl.FileSystemRights]::Modify, $inherit, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)
         $acl.AddAccessRule($rule)
     }
@@ -306,10 +306,12 @@ function Get-BackupWritersSid {
     try { return $account.Translate([System.Security.Principal.SecurityIdentifier]) } catch { }
     Log "Criando o grupo local '$BackupWritersGroup'..."
     $computer = [ADSI]"WinNT://$env:COMPUTERNAME,computer"
+    # Os metodos ADSI devolvem $null pelo adaptador do PowerShell; sem o
+    # descarte, esses nulos saem da funcao junto com o SID.
     $group = $computer.Create('group', $BackupWritersGroup)
-    $group.SetInfo()
-    $group.Put('Description', $BackupWritersDescription)
-    $group.SetInfo()
+    $null = $group.SetInfo()
+    $null = $group.Put('Description', $BackupWritersDescription)
+    $null = $group.SetInfo()
     return $account.Translate([System.Security.Principal.SecurityIdentifier])
 }
 
@@ -320,7 +322,7 @@ function Sync-BackupTextfile {
     Ensure-Directory $BackupTextfileDir
     $writers = @()
     try {
-        $writers = @(Get-BackupWritersSid)
+        $writers = @(Get-BackupWritersSid | Where-Object { $_ -is [System.Security.Principal.SecurityIdentifier] })
     } catch {
         Write-Warning "Grupo local '$BackupWritersGroup' indisponivel ($($_.Exception.Message)). $BackupTextfileDir aceita escrita so de SYSTEM e Administradores."
     }
