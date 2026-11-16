@@ -335,9 +335,25 @@ O formato está no contrato `contracts/prometheus/backup.yml` do repositório
   todos (`0644`);
 - aposentar um backup = apagar o arquivo.
 
+Os alertas (área `backups`, códigos BKP no repositório `grafana`) são genéricos:
+nenhum servidor ou horário fica nas regras. O que cada produtor publica define
+como o backup é avaliado:
+
+| O produtor publica | Efeito nos alertas |
+|---|---|
+| `backup_success_due_timestamp_seconds` (prazo do próximo sucesso: primeira execução agendada depois do último sucesso) | Atraso medido pelo prazo; preciso em qualquer agenda (fim de semana, mensal) |
+| só `backup_expected_interval_seconds` (maior intervalo entre execuções) | Atraso medido pelo intervalo |
+| nenhum dos dois | Sem alerta de atraso; falha, degradado e coleta continuam valendo |
+| `criticality="baixa"` em `backup_info` | Alertas do backup um nível abaixo (padrão `alta`) |
+
+Para garantir que um backup existe (e alertar se nunca for reportado), liste-o
+na seção `backups` do `catalogo.yml` do repositório `grafana`. A lista é opt-in:
+servidor sem backup interno não entra.
+
 No Linux, série duplicada em dois arquivos ou HELP diferente para a mesma
 métrica são descartadas sem erro; arquivo inválido ou pasta ausente aparecem
-como `*_textfile_scrape_error 1`. O diagnóstico ([6]) mostra a seção
+como `node_textfile_scrape_error 1`. No Windows, o mesmo erro aparece como
+`windows_exporter_collector_success{collector="textfile"} 0`. O diagnóstico ([6]) mostra a seção
 **BACKUPS** com os arquivos presentes e os membros do grupo.
 
 ## Módulos opcionais (Windows)
