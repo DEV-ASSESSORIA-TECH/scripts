@@ -10,7 +10,11 @@ requisitos. A documentação dos processos fica na base de conhecimento interna.
 
 | Área | Pasta | Descrição |
 |------|-------|-----------|
-| Monitoramento | [`monitoring/alloy`](monitoring/alloy) | Agente Grafana Alloy (Linux e Windows) |
+| Monitoramento | [DEV-ASSESSORIA-TECH/alloy](https://github.com/DEV-ASSESSORIA-TECH/alloy) | Agente Grafana Alloy (Linux e Windows). Saiu deste repositório; [`monitoring/alloy`](monitoring/alloy) guarda só uma ponte temporária |
+
+Ferramentas que crescem a ponto de precisar de versões próprias (releases,
+CI, documentação extensa) ganham um repositório separado; aqui ficam os
+scripts menores.
 
 ## Organização
 
